@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+certs/
+deploy/windows/bin/
+*.log
+.env.demo
+.claude/
+deploy/windows/Caddyfile
+*.tmp

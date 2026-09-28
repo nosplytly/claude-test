@@ -1,0 +1,106 @@
+# SupplierHub — nginx for Windows. install.ps1 renders this into deploy\windows\bin\nginx\conf\nginx.conf
+# (__DOMAIN__, __ROOT__, __PORT__ are filled in). Edit the template, not the rendered file, then run install.ps1 again.
+
+worker_processes  1;  # nginx for Windows serves with one worker anyway
+error_log  logs/error.log warn;
+pid        logs/nginx.pid;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    server_tokens off;
+    server_names_hash_bucket_size 64;  # "www.sh-control-universe.com" doesn't fit the Windows build's default of 32
+    sendfile      on;
+    keepalive_timeout      30s;
+    client_max_body_size   256k;
+    client_body_timeout    15s;
+    client_header_timeout  15s;
+    send_timeout           30s;
+
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript application/json image/svg+xml text/plain;
+
+    # only answers worth a look (4xx/5xx) are logged here; the app keeps its own log. guard.ps1 rotates this file.
+    map $status $loggable { ~^[23] 0; default 1; }
+    access_log logs/access.log combined if=$loggable;
+
+    # per-IP limits: the second line of defence (the app has its own limits and a built-in fail2ban)
+    limit_req_zone  $binary_remote_addr zone=site:10m rate=30r/s;
+    limit_req_zone  $binary_remote_addr zone=api:10m  rate=10r/s;
+    limit_conn_zone $binary_remote_addr zone=perip:10m;
+    limit_req_status  429;
+    limit_conn_status 429;
+
+    upstream supplierhub {
+        server 127.0.0.1:__PORT__;
+        keepalive 16;
+    }
+
+    ssl_certificate      "__ROOT__/certs/fullchain.pem";
+    ssl_certificate_key  "__ROOT__/certs/privkey.pem";
+    ssl_protocols        TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache    shared:SSL:10m;
+    ssl_session_timeout  1d;
+    ssl_session_tickets  off;
+
+    # anything that isn't our domain (scanners knocking on the bare IP): drop without an answer
+    server {
+        listen 80 default_server;
+        server_name _;
+        return 444;
+    }
+    server {
+        listen 443 ssl default_server;
+        server_name _;
+        ssl_reject_handshake on;
+    }
+
+    # http -> https, www -> apex
+    server {
+        listen 80;
+        server_name __DOMAIN__ www.__DOMAIN__;
+        return 301 https://__DOMAIN__$request_uri;
+    }
+    server {
+        listen 443 ssl;
+        http2 on;
+        server_name www.__DOMAIN__;
+        return 301 https://__DOMAIN__$request_uri;
+    }
+
+    server {
+        listen 443 ssl;
+        http2 on;
+        server_name __DOMAIN__;
+
+        limit_conn perip 40;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        # SET, not append: a client can't smuggle a fake address in front (the app bans and rate-limits by it)
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout    60s;
+
+        location /assets/ {
+            proxy_pass http://supplierhub;
+        }
+        location /api/ {
+            limit_req zone=api burst=40 nodelay;
+            proxy_pass http://supplierhub;
+        }
+        location / {
+            limit_req zone=site burst=60 nodelay;
+            proxy_pass http://supplierhub;
+        }
+    }
+}

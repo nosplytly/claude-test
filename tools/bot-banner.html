@@ -1,0 +1,73 @@
+<!doctype html>
+<!-- Source of app/web/assets/img/bot-banner.jpg (the picture on top of the bot's customer screens).
+     Re-render: open in Chromium at 1280x640 and take a screenshot, or see README → «Баннер бота». -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face { font-family: "Manrope"; font-weight: 200 800; src: url("../app/web/assets/fonts/manrope-cyrillic.woff2") format("woff2");
+    unicode-range: U+0400-045F; }
+  @font-face { font-family: "Manrope"; font-weight: 200 800; src: url("../app/web/assets/fonts/manrope-latin.woff2") format("woff2"); }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; background: #0B0B0C; }
+  body { position: relative; font-family: "Manrope", sans-serif; color: #F7F7F5; }
+  .grid { position: absolute; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Crect x='9.5' y='9.5' width='61' height='61' rx='16' fill='none' stroke='white' stroke-opacity='.06'/%3E%3C/svg%3E");
+    background-size: 80px 80px; background-position: -8px -8px;
+    -webkit-mask-image: radial-gradient(ellipse 75% 85% at 70% 50%, #000 25%, transparent 78%); }
+  .glow { position: absolute; width: 900px; height: 900px; left: 640px; top: -130px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(43, 89, 255, .30), rgba(43, 89, 255, .08) 42%, transparent 68%); }
+  .left { position: absolute; left: 88px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: center; }
+  .brand { display: flex; align-items: center; gap: 28px; }
+  .word { font-weight: 800; font-size: 92px; letter-spacing: -3px; line-height: 1; }
+  .tag { margin-top: 26px; font-weight: 600; font-size: 40px; color: #B4B4BE; letter-spacing: -.5px; }
+  .tag b { color: #F7F7F5; font-weight: 700; }
+  .coins { display: flex; gap: 14px; margin-top: 54px; }
+  .coin { width: 68px; height: 68px; border-radius: 20px; background: #16161A; border: 1.5px solid rgba(255, 255, 255, .09);
+    display: grid; place-items: center; }
+  .coin img { width: 40px; height: 40px; }
+  /* the logo's four tiles, blown up on the right */
+  .tiles { position: absolute; right: 92px; top: 50%; translate: 0 -50%; display: grid; grid-template-columns: repeat(2, 176px);
+    gap: 26px; rotate: -8deg; }
+  .t { width: 176px; height: 176px; border-radius: 46px; background: #F7F7F5; display: grid; place-items: center;
+    box-shadow: 0 30px 60px -20px rgba(0, 0, 0, .7); }
+  .t.blue { background: #2B59FF; box-shadow: 0 30px 80px -10px rgba(43, 89, 255, .65); }
+  .t svg { width: 96px; height: 96px; }
+  .t.steam svg { width: 104px; height: 104px; }
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="glow"></div>
+
+  <div class="left">
+    <div class="brand">
+      <svg width="104" height="104" viewBox="0 0 64 64" aria-hidden="true"><g transform="translate(9 9)">
+        <rect width="21" height="21" rx="5.5" fill="#F7F7F5"/><circle cx="10.5" cy="10.5" r="4.2" fill="none" stroke="#0B0B0C" stroke-width="2.7"/>
+        <rect x="25" width="21" height="21" rx="5.5" fill="#F7F7F5"/><path d="M35.5 4.6l5.9 5.9-5.9 5.9-5.9-5.9z" fill="#0B0B0C"/>
+        <rect y="25" width="21" height="21" rx="5.5" fill="#F7F7F5"/><rect x="4.9" y="31.8" width="11.2" height="7.4" rx="1.7" fill="#0B0B0C"/>
+        <rect x="25" y="25" width="21" height="21" rx="5.5" fill="#2B59FF"/><path d="M35.5 30.5v10M30.5 35.5h10" stroke="#0B0B0C" stroke-width="3" stroke-linecap="round"/>
+      </g></svg>
+      <div class="word">SupplierHub</div>
+    </div>
+    <div class="tag">Пополнение <b>Steam</b> криптовалютой</div>
+    <div class="coins">
+      <div class="coin"><img src="../app/web/assets/coins/usdt.svg" alt=""></div>
+      <div class="coin"><img src="../app/web/assets/coins/btc.svg" alt=""></div>
+      <div class="coin"><img src="../app/web/assets/coins/eth.svg" alt=""></div>
+      <div class="coin"><img src="../app/web/assets/coins/ton.svg" alt=""></div>
+      <div class="coin"><img src="../app/web/assets/coins/sol.svg" alt=""></div>
+      <div class="coin"><img src="../app/web/assets/coins/ltc.svg" alt=""></div>
+      <div class="coin"><img src="../app/web/assets/coins/trx.svg" alt=""></div>
+      <div class="coin"><img src="../app/web/assets/coins/bnb.svg" alt=""></div>
+    </div>
+  </div>
+
+  <div class="tiles" aria-hidden="true">
+    <div class="t"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.6" fill="none" stroke="#0B0B0C" stroke-width="3.4"/></svg></div>
+    <div class="t steam"><svg viewBox="0 0 24 24"><path fill="#0B0B0C" d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z"/></svg></div>
+    <div class="t"><svg viewBox="0 0 24 24"><rect x="5.2" y="7.4" width="13.6" height="9.2" rx="2.1" fill="#0B0B0C"/></svg></div>
+    <div class="t blue"><svg viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13" stroke="#0B0B0C" stroke-width="3.4" stroke-linecap="round"/></svg></div>
+  </div>
+</body>
+</html>
