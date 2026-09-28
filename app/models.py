@@ -120,6 +120,36 @@ class Order(TimestampMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     admin_alerted: Mapped[bool] = mapped_column(Boolean, default=False)
     admin_msgs: Mapped[str | None] = mapped_column(Text)  # JSON [[chat_id, message_id]]: the admin card, edited later
+    promo_id: Mapped[int | None] = mapped_column(Integer)  # discount promo code applied to this order
+    promo_pct: Mapped[Decimal | None] = mapped_column(DecText)  # extra % it gave (already inside client_discount)
+
+
+class Promo(TimestampMixin, Base):
+    """Promo code. kind "discount": `value` % on top of the client's discount for one order (never past the
+    supplier's discount: we don't sell at a loss). kind "bonus": `value` USD straight to the balance."""
+
+    __tablename__ = "promos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(8))  # discount | bonus
+    value: Mapped[Decimal] = mapped_column(DecText)
+    max_uses: Mapped[int | None] = mapped_column(Integer)  # None = unlimited
+    used: Mapped[int] = mapped_column(Integer, default=0)
+    per_user: Mapped[int] = mapped_column(Integer, default=1)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class PromoUse(Base):
+    __tablename__ = "promo_uses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    promo_id: Mapped[int] = mapped_column(ForeignKey("promos.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    order_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Invoice(TimestampMixin, Base):

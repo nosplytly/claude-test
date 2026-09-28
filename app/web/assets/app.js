@@ -54,7 +54,8 @@ const decimals = (step) => (String(step).split('.')[1] || '').length;
 const ceilTo = (x, step) => { const f = 10 ** decimals(step); return Math.ceil(x * f - 1e-7) / f; };
 const fmtCoin = (x, step) => x.toFixed(decimals(step)).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
 const fmtDate = (iso) => new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-const discount = () => +(S.user?.discount ?? S.cfg.discount);
+// a discount promo code replaces it with the total the server computed (capped the same way it will cap the order)
+const discount = () => +(S.promo?.total ?? S.user?.discount ?? S.cfg.discount);
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
@@ -639,8 +640,10 @@ async function submitOrder() {
     $('#ctaText').textContent = 'Создаём счёт…';
     const o = await api('/api/orders', {
       method: 'POST',
-      body: { steam_login: login, amount: String(parseAmount()), currency: S.currency, method: pick.st.method },
+      body: { steam_login: login, amount: String(parseAmount()), currency: S.currency, method: pick.st.method,
+        promo: S.promo?.code || null },
     });
+    if (S.promo) { S.promo = null; renderPromo(); }  // one order per code use
     refreshUser();
     location.hash = `#/order/${o.id}`;
   } catch (e) {
@@ -652,6 +655,55 @@ async function submitOrder() {
     compute();
   }
 }
+
+// ------------------------------------------------------------------ promo code
+function renderPromo() {
+  const on = !!S.promo;
+  $('#promoChip').hidden = !on;
+  $('#promoOpen').hidden = on || !$('#promoRow').hidden;
+  if (on) {
+    $('#promoRow').hidden = true;
+    $('#promoCode').textContent = S.promo.code;
+    $('#promoLabel').textContent = S.promo.label;
+  }
+  renderUser();
+}
+
+async function applyPromo() {
+  const code = $('#promoInput').value.trim().toUpperCase();
+  if (!code) { $('#promoInput').focus(); return; }
+  const btn = $('#promoApply');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/promo/check', { method: 'POST', body: { code } });
+    if (r.kind === 'bonus') {  // balance bonus: credit it right away
+      if (!S.user) { toast('Войдите, чтобы зачислить бонус на баланс'); openLogin(); return; }
+      const x = await api('/api/promo/redeem', { method: 'POST', body: { code } });
+      $('#promoInput').value = '';
+      toast(`Промокод ${r.code}: ${x.label}`);
+      refreshUser();
+      return;
+    }
+    S.promo = { code: r.code, total: +r.total, label: r.label };
+    renderPromo();
+    toast(`Промокод ${r.code} применён: скидка ${fmtPct(S.promo.total)}`);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const fmtPct = (x) => `${+x.toFixed(2)}%`;
+$('#promoOpen').addEventListener('click', () => {
+  $('#promoRow').hidden = false;
+  $('#promoOpen').hidden = true;
+  $('#promoInput').focus();
+});
+$('#promoApply').addEventListener('click', applyPromo);
+$('#promoInput').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); applyPromo(); } });
+$('#promoInput').addEventListener('input', (ev) => { ev.target.value = ev.target.value.toUpperCase(); });
+$('#promoRemove').addEventListener('click', () => { S.promo = null; $('#promoInput').value = ''; renderPromo(); });
 
 // ------------------------------------------------------------------ balance top-up form
 const dpick = makePicker({ coins: $('#depCoins'), nets: $('#depNets'), wrap: $('#depNetsWrap'), storeKey: 'sh_dep_method',

@@ -27,8 +27,9 @@ from .deposits import create_deposit, deposit_view, display_address
 from .models import ApiKey, LedgerEntry
 from .money import plain, usd_str
 from .nervixy import CURRENCIES, NervixyError, NervixyTransportError, nervixy
+from . import promos
 from .orders import (CUR_SIGN, OrderError, apply_status, check_status, create_order, discount_for, limits,
-                     order_transfers)
+                     move_status, order_transfers)
 from .payments.invoices import effective_price
 from .utils import token
 from .webhooks import BadWebhookUrl, check_url
@@ -270,6 +271,40 @@ async def api_me(user: User | None = Depends(current_user)):
     return {"user": user_view(user)}
 
 
+class PromoIn(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+
+
+@router.post("/api/promo/check", dependencies=[Depends(csrf)])
+async def api_promo_check(body: PromoIn, request: Request, user: User | None = Depends(current_user)):
+    """What a code gives. Discount codes: the total discount the order form should show (capped like the server
+    will cap it). Bonus codes are only described here; /api/promo/redeem credits them."""
+    hit(f"promo:{client_ip(request)}", 12, 600)  # guessing codes gets you rate-limited, then banned
+    try:
+        async with session_scope() as s:
+            p = await promos.find(s, body.code)
+            if user and await promos.uses_by(s, p.id, user.id) >= p.per_user:
+                raise promos.PromoError("Вы уже использовали этот промокод")
+    except promos.PromoError as e:
+        raise HTTPException(400, str(e)) from e
+    view = {"code": p.code, "kind": p.kind, "value": plain(p.value), "label": promos.label(p)}
+    if p.kind == "discount":
+        sd = await nervixy.supplier_discount()
+        view["total"] = plain(promos.combined(discount_for(user), sd, p.value))
+    return view
+
+
+@router.post("/api/promo/redeem", dependencies=[Depends(csrf)])
+async def api_promo_redeem(body: PromoIn, request: Request, user: User = Depends(require_user)):
+    hit(f"promo:{client_ip(request)}", 12, 600)
+    try:
+        async with session_scope() as s:
+            p, new = await promos.redeem_bonus(s, user.id, body.code)
+    except promos.PromoError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "label": promos.label(p), "balance": usd_str(new)}
+
+
 @router.get("/api/me/avatar")
 async def api_avatar(user: User = Depends(require_user)):
     """The logged-in user's own Telegram photo; 204 when there is none (the site keeps the letter)."""
@@ -286,6 +321,7 @@ class OrderIn(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     currency: str = Field(min_length=3, max_length=3)
     method: str | None = Field(default=None, max_length=24)
+    promo: str | None = Field(default=None, max_length=32)
 
 
 @router.post("/api/orders", dependencies=[Depends(csrf)])
@@ -294,7 +330,7 @@ async def api_create_order(body: OrderIn, request: Request, user: User = Depends
     try:
         async with session_scope() as s:  # `user` is detached: create_order touches `s` only after supplier calls
             o = await create_order(s, user, steam_login=body.steam_login, amount=body.amount, currency=body.currency,
-                                   method_code=body.method)
+                                   method_code=body.method, promo_code=body.promo or None)
             oid = o.id
     except OrderError as e:
         raise HTTPException(400, str(e)) from e
@@ -332,9 +368,13 @@ async def api_cancel(pid: str, user: User = Depends(require_user)):
         detected = (await s.execute(select(Invoice).where(Invoice.order_id == o.id, Invoice.status == "detected"))).first()
         if detected:
             raise HTTPException(400, "Платёж уже найден — дождитесь подтверждения")
+        if not await move_status(s, o.id, ("awaiting_payment",), "cancelled"):  # a payment won the race
+            raise HTTPException(400, "Этот заказ уже нельзя отменить")
         for inv in (await s.execute(select(Invoice).where(Invoice.order_id == o.id, Invoice.status == "pending"))).scalars():
             inv.status = "cancelled"  # the unique amount stays reserved: a late payment still lands on the balance
         o.status, o.finished_at = "cancelled", utcnow()
+        if o.promo_id:
+            await promos.give_back(s, o.id)
         return await order_view(s, o)
 
 
@@ -423,7 +463,7 @@ async def api_deposit(pid: str, user: User = Depends(require_user), s: AsyncSess
     return view
 
 
-KIND_RU = {"deposit": "Пополнение", "order": "Заказ", "refund": "Возврат", "adjust": "Корректировка"}
+KIND_RU = {"deposit": "Пополнение", "order": "Заказ", "refund": "Возврат", "adjust": "Корректировка", "promo": "Промокод"}
 
 
 @router.get("/api/balance/history")

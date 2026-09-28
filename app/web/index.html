@@ -149,6 +149,18 @@
         <div class="sum-note" id="sNote"></div>
       </div>
 
+      <div class="promo" id="promo">
+        <button type="button" class="link-btn" id="promoOpen">Есть промокод?</button>
+        <div class="promo-row" id="promoRow" hidden>
+          <input id="promoInput" class="promo-input" maxlength="32" placeholder="ПРОМОКОД" autocomplete="off" spellcheck="false" aria-label="Промокод">
+          <button type="button" class="promo-apply" id="promoApply">Применить</button>
+        </div>
+        <div class="promo-chip" id="promoChip" hidden>
+          <svg class="i" aria-hidden="true"><use href="#i-percent"/></svg><b id="promoCode"></b><span id="promoLabel"></span>
+          <button type="button" id="promoRemove" aria-label="Убрать промокод"><svg class="i"><use href="#i-x"/></svg></button>
+        </div>
+      </div>
+
       <button class="cta" id="cta" type="submit"><span class="plus"><svg><use href="#i-plus"/></svg></span><span id="ctaText">Перейти к оплате</span></button>
       <p class="fine">Продолжая, вы принимаете <button type="button" class="link-btn" data-open="terms">условия сервиса</button></p>
     </form>

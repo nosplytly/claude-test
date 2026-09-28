@@ -155,16 +155,23 @@ def line(char: str = "─", n: int = 18) -> str:
 
 
 # ------------------------------------------------------------------ message layout
-# A message is a header (emoji + bold title) and panels: <blockquote> blocks that Telegram draws as tinted plates
-# with an accent bar. Long lists go in an expandable panel (collapsed to a few lines, «развернуть» shows all).
+# A message is a header (emoji + bold title) and panels — groups of lines. With TG_PANELS=true a panel is a
+# <blockquote>: Telegram draws it as a tinted plate, but in the colour IT assigns to the bot's account (by bot id;
+# a bot can't choose it — @SupplierHubSteamBot got red). So by default a panel is just its lines after a blank line.
 
 def title(icon: str, text: str, extra: str = "") -> str:
     return f"{e(icon)} <b>{text}</b>{f' · {extra}' if extra else ''}"
 
 
 def panel(*lines: str, expandable: bool = False) -> str:
+    from .config import settings
+
     body = "\n".join(x for x in lines if x)
-    return f"<blockquote{' expandable' if expandable else ''}>{body}</blockquote>" if body else ""
+    if not body:
+        return ""
+    if settings.tg_panels:
+        return f"<blockquote{' expandable' if expandable else ''}>{body}</blockquote>"
+    return "\n" + body
 
 
 def visible_len(text: str) -> int:

@@ -704,6 +704,33 @@ body.intro-on .stage, body.intro-on .foot { visibility: hidden; }
   .fine { font-size: 10px; }
 }
 
+/* ============================================================ promo code (under the summary) */
+.promo { margin: 12px 0 2px; display: flex; justify-content: center; }
+.promo .link-btn { font-size: 13px; }
+.promo-row { display: flex; gap: 8px; width: 100%; }
+.promo-input {
+  flex: 1; min-width: 0; height: 44px; padding: 0 14px; border-radius: 12px; background: #16161b;
+  border: 1px solid rgba(255, 255, 255, .12); color: var(--text); font-family: inherit; font-weight: 700;
+  font-size: 14px; letter-spacing: .06em;
+}
+.promo-input:focus { outline: none; border-color: rgba(120, 150, 255, .7); box-shadow: 0 0 0 3px rgba(43, 89, 255, .2); }
+.promo-apply {
+  height: 44px; padding: 0 16px; border-radius: 12px; border: 1px solid rgba(96, 132, 255, .45); color: #fff;
+  background: rgba(43, 89, 255, .22); font-weight: 800; font-size: 13.5px; transition: background .2s;
+}
+.promo-apply:hover { background: rgba(43, 89, 255, .36); }
+.promo-apply:disabled { opacity: .6; }
+.promo-chip {
+  display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 12px; border-radius: 999px;
+  background: rgba(61, 220, 132, .1); border: 1px solid rgba(61, 220, 132, .35); color: #bff5d4; font-size: 13px;
+}
+.promo-chip .i { width: 15px; height: 15px; color: #3ddc84; }
+.promo-chip b { color: #fff; letter-spacing: .04em; }
+.promo-chip button { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; border: 0;
+  background: transparent; color: #bff5d4; }
+.promo-chip button:hover { background: rgba(255, 255, 255, .08); }
+.promo-chip button .i { width: 13px; height: 13px; color: inherit; }
+
 /* ============================================================ top right: quiet support + bright login */
 /* support: no fill, a chat bubble with a live green dot — reads as "help", not as another button */
 .support-pill {

@@ -255,8 +255,8 @@ async def main():
           "где в паке нет подходящего эмодзи — обычный перед текстом")
     check('<tg-emoji emoji-id="5319142830877223516">' in home.caption and '<tg-emoji emoji-id="5318774481597017341">' in home.caption,
           "в подписи логотип и «привет» из твоего пака")
-    check(home.caption.count("<blockquote>") == 1 and "Скидка" in home.caption.split("<blockquote>")[1],
-          "преимущества — на плашке")
+    check("<blockquote" not in home.caption and "\n\n" in home.caption and "Скидка" in home.caption.split("\n\n")[-1],
+          "преимущества отдельным блоком, без цитаты (её цвет Telegram берёт от бота — у нас красный)")
     check("Привет, Иван" in home.caption, "меню здоровается по имени")
     bal_buttons = [b.text for b in buttons_ if "Баланс" in b.text and "$" in b.text]
     check(len(bal_buttons) == 1 and "Баланс" not in home.caption and "$" not in home.caption,
@@ -266,7 +266,7 @@ async def main():
     check(next(c for c in out if isinstance(c, SendPhoto)).photo == "banner-file-id",
           "дальше картинка уходит по file_id — без повторной загрузки")
     out = await press(555, "m:bal", photo=True)
-    check(any(isinstance(c, EditMessageCaption) and "Баланс: $" in c.caption and "<blockquote>" in c.caption for c in out)
+    check(any(isinstance(c, EditMessageCaption) and "Баланс: $" in c.caption and "<blockquote" not in c.caption for c in out)
           and not any(isinstance(c, (DeleteMessage, SendPhoto)) for c in out),
           "«Баланс» под картинкой → та же картинка, меняется подпись (движения на плашке)")
     out = await press(555, "m:orders", photo=True)
@@ -291,9 +291,14 @@ async def main():
     for key, word in (("a:home", "Админ-панель"), ("a:stats", "маржа"), ("a:nx", "Nervixy"), ("a:work", "очередь"),
                       ("a:last", "Последние заказы"), ("a:help", "/bal")):
         out = await press(999, key, "boss")
-        check(word.lower() in texts(out).lower() and "<blockquote" in texts(out), f"админ-кнопка {key} → «{word}», на плашках")
+        check(word.lower() in texts(out).lower() and "<blockquote" not in texts(out), f"админ-кнопка {key} → «{word}»")
     out = await press(999, "a:stats", "boss")
-    check(texts(out).count("<blockquote>") == 4, "статистика: четыре периода — четыре плашки")
+    check(texts(out).count("\n\n") >= 4, "статистика: четыре периода — четыре отдельных блока")
+    from app.config import settings as _st
+    from app.tgui import panel as _panel
+    _st.tg_panels = True
+    check(_panel("x").startswith("<blockquote>"), "TG_PANELS=true возвращает цитатные плашки (для бота с подходящим цветом)")
+    _st.tg_panels = False
 
     print("5f. пак эмодзи")
     out = await send_text(999, "/emoji", "boss")
@@ -390,6 +395,28 @@ async def main():
         notify._throttle.clear()  # as if the service had been restarted
     sent = [c for c in session.calls if isinstance(c, SendMessage) and c.text == "Баланс nervixy низкий"]
     check(len(sent) == 1, "алерт с интервалом после перезапуска сервиса не повторяется (время хранится в базе)")
+
+    print("8. промокоды в боте")
+    out = await send_text(555, "/promo new HACK $100")
+    from app.models import Promo
+    async with session_scope() as s:
+        hack = (await s.execute(select(Promo).where(Promo.code == "HACK"))).scalar_one_or_none()
+    check(hack is None and "Такого промокода нет" in texts(out), "клиент не может создать промокод (для него это ввод кода)")
+    out = await send_text(999, "/promo new BOTGIFT $3 5 7d", "boss")
+    check("BOTGIFT" in texts(out) and "+$3 на баланс" in texts(out) and "5 раз" in texts(out),
+          "админ: /promo new BOTGIFT $3 5 7d → создан")
+    out = await send_text(999, "/promo new BOTGIFT $3", "boss")
+    check("уже есть" in texts(out), "повторное создание того же кода → «уже есть»")
+    out = await send_text(999, "/promo new BAD% 1%", "boss")
+    check("Код:" in texts(out), "кривой код → подсказка формата")
+    out = await send_text(555, "/promo botgift")
+    check("+$3 на баланс" in texts(out) and "На балансе" in texts(out), "клиент: /promo botgift → $3 на баланс")
+    out = await send_text(555, "/promo BOTGIFT")
+    check("уже использовали" in texts(out), "второй раз → «уже использовали»")
+    out = await send_text(999, "/promo", "boss")
+    check("BOTGIFT" in texts(out) and "1/5" in texts(out), "админ: /promo → список, BOTGIFT использован 1 из 5")
+    out = await send_text(999, "/promo off BOTGIFT", "boss")
+    check("выключен" in texts(out), "админ: /promo off → выключен")
 
     print(f"\nALL GOOD: {OK} checks passed")
 

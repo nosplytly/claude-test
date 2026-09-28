@@ -44,8 +44,8 @@ STATUS = {"awaiting_payment": ("wait", "ждёт оплату"), "paid": ("card"
           "queued": ("queue", "в очереди"), "uncertain": ("wait", "проверяется"), "processing": ("wait", "пополняется"),
           "delivered": ("ok", "готово"), "rejected": ("fail", "возврат на баланс"), "expired": ("clock", "истёк"),
           "cancelled": ("cancel", "отменён")}
-KIND = {"deposit": "Пополнение", "order": "Заказ", "refund": "Возврат", "adjust": "Корректировка"}
-KIND_ICON = {"deposit": "money", "order": "steam", "refund": "refund", "adjust": "swap"}
+KIND = {"deposit": "Пополнение", "order": "Заказ", "refund": "Возврат", "adjust": "Корректировка", "promo": "Промокод"}
+KIND_ICON = {"deposit": "money", "order": "steam", "refund": "refund", "adjust": "swap", "promo": "gift"}
 
 
 def join(*parts: str) -> str:
@@ -537,6 +537,67 @@ async def cmd_disc(message: Message, command: CommandObject):
 async def cmd_bans(message: Message):
     if is_admin(message.from_user.id):
         await show(message, *await screen_bans(), edit=False)
+
+
+@router.message(Command("promo"))
+async def cmd_promo(message: Message, command: CommandObject):
+    """Admin: /promo · /promo new CODE 0.5%|$2 [uses] [7d] · /promo off CODE.   Client: /promo CODE (balance bonus)."""
+    from sqlalchemy.exc import IntegrityError
+
+    from . import promos
+    from .models import Promo
+
+    args = (command.args or "").split()
+    uid = message.from_user.id
+    if is_admin(uid) and (not args or args[0].lower() in ("new", "off", "list")):
+        if args and args[0].lower() == "new":
+            try:
+                spec = promos.parse_new(args[1:])
+                async with session_scope() as s:
+                    s.add(Promo(created_by=uid, **spec))
+            except promos.PromoError as err:
+                return await message.answer(f"{e('warn')} {err}")
+            except IntegrityError:
+                return await message.answer(f"{e('warn')} Код <code>{esc(spec['code'])}</code> уже есть")
+            limit = f"{spec['max_uses']} раз" if spec["max_uses"] else "без лимита"
+            until = f"до {spec['expires_at'] + timedelta(hours=3):%d.%m %H:%M} МСК" if spec["expires_at"] else "бессрочно"
+            kind = f"−{spec['value']}% к скидке на заказ" if spec["kind"] == "discount" else f"+${spec['value']} на баланс"
+            return await message.answer(f"{e('ok')} Промокод <code>{spec['code']}</code>: {kind} · {limit} · {until}\n"
+                                        "<i>Скидка складывается с обычной, но итог не больше скидки поставщика минус "
+                                        f"{promos.MIN_MARGIN}% — в минус не уйдём.</i>")
+        if args and args[0].lower() == "off":
+            if len(args) < 2:
+                return await message.answer("Формат: <code>/promo off КОД</code>")
+            async with session_scope() as s:
+                p = (await s.execute(select(Promo).where(Promo.code == promos.normalize(args[1])))).scalar_one_or_none()
+                if p:
+                    p.active = False
+            return await message.answer(f"{e('ok')} Промокод <code>{esc(promos.normalize(args[1]))}</code> выключен"
+                                        if p else f"{e('question')} Такого кода нет")
+        async with session_scope() as s:
+            rows = (await s.execute(select(Promo).order_by(Promo.id.desc()).limit(15))).scalars().all()
+        lines = [f"<code>{p.code}</code> · {promos.label(p)} · {p.used}/{p.max_uses or '∞'}"
+                 + (f" · до {p.expires_at + timedelta(hours=3):%d.%m}" if p.expires_at else "")
+                 + ("" if p.active else " · выключен") for p in rows]
+        return await message.answer("\n".join([title("gift", "Промокоды"),
+                                               panel(*lines) if lines else "Промокодов пока нет.",
+                                               panel("<code>/promo new SALE 0.5% 100 7d</code> — скидка −0.5%, 100 раз, 7 дней",
+                                                     "<code>/promo new GIFT $2 50</code> — $2 на баланс, 50 раз",
+                                                     "<code>/promo off SALE</code> — выключить")]))
+    # a client
+    if not args:
+        return await message.answer("Отправьте <code>/promo КОД</code> — бонус зачислится на баланс. "
+                                    "Промокод на скидку вводится на сайте при оформлении заказа.")
+    u = await _user(uid)
+    if not u:
+        return await message.answer(f"{e('lock')} Сначала войдите на сайте через Telegram — потом активируйте промокод.")
+    try:
+        async with session_scope() as s:
+            p, new = await promos.redeem_bonus(s, u.id, args[0])
+    except promos.PromoError as err:
+        return await message.answer(f"{e('warn')} {err}")
+    await message.answer(f"{e('gift')} Промокод <code>{p.code}</code>: {promos.label(p)}\n"
+                         f"{e('money')} На балансе: <b>${usd_str(new)}</b>")
 
 
 @router.message(Command("report"))

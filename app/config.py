@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     backup_password: str = ""
     # --- morning report to the admins (hour, Moscow time; -1 = off) ---
     report_hour_msk: int = 9
+    # --- bot look: quote plates around message blocks. Telegram colours them by the bot's id (ours: red, not
+    # changeable), so they're off; turn on for a bot whose colour fits ---
+    tg_panels: bool = False
 
     # --- database connection pool (SQLite: one writer at a time; readers in parallel) ---
     db_pool_size: int = 10

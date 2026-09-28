@@ -27,6 +27,7 @@ from .money import D, from_micro, plain, to_micro, usd_str
 from .nervixy import CURRENCIES, NervixyError, NervixyTransportError, nervixy
 from .notify import edit as notify_edit
 from .notify import esc, notify_admins, notify_user
+from . import promos
 from .payments.invoices import PaymentUnavailable, create_invoice
 from .payments.methods import get_method
 from .tgui import DANGER, PRIMARY, btn, e, kb, panel
@@ -118,7 +119,7 @@ async def capacity_micro(s: AsyncSession) -> int:
 
 async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount: Decimal, currency: str,
                        method_code: str | None, source: str = "web", external_id: str | None = None,
-                       balance_only: bool = False) -> Order:
+                       balance_only: bool = False, promo_code: str | None = None) -> Order:
     steam_login = (steam_login or "").strip()
     currency = (currency or "").upper()
     if currency not in CURRENCIES:
@@ -161,13 +162,24 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
     except (NervixyError, NervixyTransportError) as err:
         raise OrderError("Сервис пополнения временно недоступен, попробуйте через пару минут") from err
     nominal = amount / fx
-    price_micro = to_micro(nominal * (1 - cd / 100), up=True)
     cost_micro = to_micro(nominal * (1 - sd / 100), up=True)
 
     # ---- database only from here on. Write first: SQLite then serialises this block against parallel orders, so
     # the unpaid-orders limit and the balance check below see each other's rows (a read-first check would not).
     await s.execute(update(User).where(User.id == user.id).values(last_seen_at=utcnow())
                     .execution_options(synchronize_session=False))
+    promo = None
+    if promo_code:
+        try:
+            promo = await promos.find(s, promo_code)
+            if promo.kind != "discount":
+                raise promos.PromoError("Это промокод на баланс — активируйте его отдельно, кнопкой «Применить»")
+            if await promos.uses_by(s, promo.id, user.id) >= promo.per_user:
+                raise promos.PromoError("Вы уже использовали этот промокод")
+        except promos.PromoError as err:
+            raise OrderError(str(err)) from err
+        cd = promos.combined(cd, sd, promo.value)
+    price_micro = to_micro(nominal * (1 - cd / 100), up=True)
     if not balance_only:
         active = (await s.execute(select(func.count()).select_from(Order).where(
             Order.user_id == user.id, Order.status == "awaiting_payment"))).scalar_one()
@@ -193,9 +205,15 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
     order = Order(public_id=public_id(), user_id=user.id, steam_login=steam_login, currency=currency, amount=amount,
                   fx_rate=fx, nominal_micro=to_micro(nominal), price_micro=price_micro, cost_micro=cost_micro,
                   client_discount=cd, supplier_discount=sd, status="awaiting_payment", method=method_code,
-                  source=source, external_id=external_id)
+                  source=source, external_id=external_id,
+                  promo_id=promo.id if promo else None, promo_pct=promo.value if promo else None)
     s.add(order)
     await s.flush()
+    if promo:
+        try:
+            await promos.take(s, promo, user.id, order.id)  # atomically: the last free use can't go to two orders
+        except promos.PromoError as err:
+            raise OrderError(str(err)) from err
 
     if balance >= price_micro - (0 if balance_only else PAY_TOLERANCE_MICRO) and balance > 0:
         if not await try_charge(s, order):  # a parallel order spent the balance in the meantime
@@ -249,6 +267,8 @@ async def try_charge(s: AsyncSession, order: Order) -> bool:
 
 
 async def refund(s: AsyncSession, order: Order, reason: str, status: str = "rejected") -> None:
+    if order.promo_id:
+        await promos.give_back(s, order.id)  # the top-up didn't happen: the client keeps their promo use
     if order.charged_micro > 0:
         await change_balance(s, order.user_id, order.charged_micro, "refund", order_id=order.id,
                              comment=f"Возврат по заказу {order.public_id}")
@@ -594,8 +614,12 @@ async def expire_stale() -> None:
     async with session_scope() as s:
         await s.execute(update(Invoice).where(Invoice.status == "pending", Invoice.expires_at < now - LATE_GRACE)
                         .values(status="expired").execution_options(synchronize_session=False))
-        await s.execute(update(Order).where(Order.status == "awaiting_payment", ~open_invoice)
-                        .values(status="expired", finished_at=now).execution_options(synchronize_session=False))
+        expired = (await s.execute(update(Order).where(Order.status == "awaiting_payment", ~open_invoice)
+                                   .values(status="expired", finished_at=now).returning(Order.id, Order.promo_id)
+                                   .execution_options(synchronize_session=False))).all()
+        for oid, promo_id in expired:
+            if promo_id:
+                await promos.give_back(s, oid)  # never paid: the promo use goes back to the client
 
 
 async def recover_after_restart() -> None:
