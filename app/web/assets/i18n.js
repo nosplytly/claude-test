@@ -94,6 +94,7 @@ const EN = {
   'Промокод': 'Promo code',
   'Применить': 'Apply',
   'Убрать промокод': 'Remove promo code',
+  'Закрыть поле промокода': 'Close the promo code field',
   'Перейти к оплате': 'Proceed to payment',
   'Продолжая, вы принимаете': 'By continuing, you accept the',
   'условия сервиса': 'terms of service',

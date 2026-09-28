@@ -730,7 +730,7 @@ async function applyPromo() {
     if (r.kind === 'bonus') {  // balance bonus: credit it right away
       if (!S.user) { toast('Войдите, чтобы зачислить бонус на баланс'); openLogin(); return; }
       const x = await api('/api/promo/redeem', { method: 'POST', body: { code } });
-      $('#promoInput').value = '';
+      closePromo();
       toast(`Промокод ${r.code}: ${x.label}`);
       refreshUser();
       return;
@@ -752,7 +752,20 @@ $('#promoOpen').addEventListener('click', () => {
   $('#promoInput').focus();
 });
 $('#promoApply').addEventListener('click', applyPromo);
-$('#promoInput').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); applyPromo(); } });
+// no code after all: the cross, Esc, or leaving the empty field folds it back into the "Есть промокод?" row
+function closePromo() {
+  $('#promoInput').value = '';
+  $('#promoRow').hidden = true;
+  $('#promoOpen').hidden = !!S.promo;
+}
+$('#promoClose').addEventListener('click', () => { closePromo(); $('#promoOpen').focus(); });
+$('#promoRow').addEventListener('focusout', (ev) => {
+  if (!$('#promoInput').value.trim() && !$('#promoRow').contains(ev.relatedTarget)) closePromo();
+});
+$('#promoInput').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') { ev.preventDefault(); applyPromo(); }
+  if (ev.key === 'Escape') { ev.preventDefault(); closePromo(); $('#promoOpen').focus(); }
+});
 $('#promoInput').addEventListener('input', (ev) => { ev.target.value = ev.target.value.toUpperCase(); });
 $('#promoRemove').addEventListener('click', () => { S.promo = null; $('#promoInput').value = ''; renderPromo(); });
 

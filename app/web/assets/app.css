@@ -741,6 +741,13 @@ body.intro-on .stage, body.intro-on .foot { visibility: hidden; }
 }
 .promo-apply:hover { background: rgba(43, 89, 255, .4); }
 .promo-apply:disabled { opacity: .6; }
+.promo-close {
+  flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 13px;
+  border: 1px solid rgba(255, 255, 255, .12); background: transparent; color: #9a9dab; transition: background .2s, color .2s;
+}
+.promo-close:hover { background: rgba(255, 255, 255, .06); color: #fff; }
+.promo-close:focus-visible { outline: 2px solid #a2baff; outline-offset: 2px; }
+.promo-close .i { width: 14px; height: 14px; }
 .promo-chip {
   display: flex; align-items: center; gap: 9px; width: 100%; height: 44px; padding: 0 6px 0 14px; border-radius: 13px;
   background: rgba(61, 220, 132, .08); border: 1px solid rgba(61, 220, 132, .32); color: #bff5d4; font-size: 13px;
