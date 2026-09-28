@@ -1,3 +1,4 @@
+import { LOCALE, hooks as i18nHooks } from './i18n.js';  // first: it translates the page as app.js fills it
 import { playIntro } from './intro.js';
 import { startBackground } from './bg.js';
 
@@ -13,6 +14,54 @@ const CONFIRM_ETA = {
   usdt_sol: 'за несколько секунд', sol: 'за несколько секунд', usdt_bep20: 'меньше минуты', usdt_erc20: 'за 2–3 минуты',
   eth: 'за 2–3 минуты', btc: 'за 10–20 минут', ltc: 'за 5–10 минут',
 };
+
+// ------------------------------------------------------------------ Telegram Mini App
+// Opened from the bot, Telegram adds its signed launch data to the URL fragment (#tgWebAppData=… or #/path?tgWebAppData=…).
+// Then Telegram's SDK is loaded and the visitor is logged in with that data — no code to tap. Inside Telegram Web the
+// site runs in a cross-site iframe where cookies don't work, so the session token also rides in a header.
+const TG = { app: null, session: '' };
+const inTelegram = () => {
+  if (/tgWebAppData=/.test(location.hash)) return true;
+  try { return !!sessionStorage.getItem('__telegram__initParams'); } catch { return false; }
+};
+
+function loadTelegramSdk() {
+  return new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = 'https://telegram.org/js/telegram-web-app.js';
+    s.onload = () => resolve(window.Telegram?.WebApp || null);
+    s.onerror = () => resolve(null);
+    document.head.append(s);
+  });
+}
+
+async function initMiniApp() {
+  if (!inTelegram()) return false;
+  const wa = await loadTelegramSdk();
+  if (!wa || !wa.initData) return false;
+  TG.app = wa;
+  document.body.classList.add('in-tg');
+  try {
+    wa.ready();
+    wa.expand();
+    wa.setHeaderColor?.('#0B0B0C');
+    wa.setBackgroundColor?.('#0B0B0C');
+    wa.disableVerticalSwipes?.();  // a scroll inside the form must not close the app
+  } catch { /* older clients */ }
+  // drop the launch data from the address, keep the page the button pointed to (#/deposit …)
+  const h = location.hash;
+  const path = h.startsWith('#/') ? h.split('?')[0].split('&')[0] : '';
+  history.replaceState(null, '', location.pathname + (path || ''));
+  try {
+    const r = await api('/api/auth/webapp', { method: 'POST', body: { init_data: wa.initData } });
+    TG.session = r.token;
+    S.user = r.user;
+  } catch (e) { toast(e.message, true); }
+  wa.BackButton?.onClick(() => { location.hash = '#/'; });
+  return true;
+}
+
+const haptic = (kind) => { try { TG.app?.HapticFeedback?.notificationOccurred(kind); } catch { /* not in Telegram */ } };
 
 const S = {
   cfg: null,
@@ -31,7 +80,8 @@ const S = {
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {
     method,
-    headers: { 'X-SH': '1', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { 'X-SH': '1', ...(body ? { 'Content-Type': 'application/json' } : {}),
+      ...(TG.session ? { 'X-SH-Session': TG.session } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
   });
@@ -46,14 +96,14 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 
 const nf = (v, max = 2, min = 0) =>
-  new Intl.NumberFormat('ru-RU', { maximumFractionDigits: max, minimumFractionDigits: min }).format(v);
+  new Intl.NumberFormat(LOCALE, { maximumFractionDigits: max, minimumFractionDigits: min }).format(v);
 const sign = (cur) => (S.cfg?.currencies.find((c) => c.code === cur) || {}).sign || cur;
 const fmtFiat = (v, cur) => `${nf(v, 2, Math.abs(v - Math.round(v)) > 0.004 ? 2 : 0)} ${sign(cur)}`;
 const fmtUsd = (v) => `${v < 0 ? '−' : ''}$${nf(Math.abs(v), 2, 2)}`;
 const decimals = (step) => (String(step).split('.')[1] || '').length;
 const ceilTo = (x, step) => { const f = 10 ** decimals(step); return Math.ceil(x * f - 1e-7) / f; };
 const fmtCoin = (x, step) => x.toFixed(decimals(step)).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
-const fmtDate = (iso) => new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const fmtDate = (iso) => new Date(iso).toLocaleString(LOCALE, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 // a discount promo code replaces it with the total the server computed (capped the same way it will cap the order)
 const discount = () => +(S.promo?.total ?? S.user?.discount ?? S.cfg.discount);
 const store = {
@@ -63,6 +113,7 @@ const store = {
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
 function toast(msg, bad = false) {
+  if (bad) haptic('error');
   const t = el('div', 'toast' + (bad ? ' bad' : ''));
   t.innerHTML = `<svg class="i"><use href="#${bad ? 'i-warn' : 'i-check'}"/></svg><span></span>`;
   t.querySelector('span').textContent = msg;
@@ -787,6 +838,7 @@ $('#viewDeposit').addEventListener('submit', async (e) => {
 
 // ------------------------------------------------------------------ views & routing
 function showView(id) {
+  document.body.dataset.view = id;  // narrow screens show the plugin strip only next to the order form
   for (const v of ['viewForm', 'viewDeposit', 'viewPay', 'viewResult']) {
     const node = $('#' + v);
     const on = v === id;
@@ -803,6 +855,9 @@ function stopPolling() { clearTimeout(S.poll); clearInterval(S.timer); S.poll = 
 
 function route() {
   stopPolling();
+  if (TG.app?.BackButton) {  // Telegram's own «back» arrow on every page except the form
+    if (location.hash && location.hash !== '#/') TG.app.BackButton.show(); else TG.app.BackButton.hide();
+  }
   if (!S.cfg) { showView('viewForm'); return; }
   const h = location.hash;
   let m;
@@ -966,6 +1021,7 @@ function renderResult(kind, d) {
       $('#resMainText').textContent = 'Пополнить Steam';
     }
     confetti();
+    haptic('success');
   } else if (d.stage === 'failed') {
     mark.classList.add('fail');
     icon.setAttribute('d', 'M7 7l10 10M17 7 7 17');
@@ -1236,6 +1292,28 @@ document.addEventListener('click', (e) => {
   openModal(t.dataset.open === 'faq' ? 'tplFaq' : 'tplTerms');
 });
 
+// ------------------------------------------------------------------ coming soon: the FunPay / Playerok plugin
+// "Узнать о запуске": signed in — straight onto the waiting list; otherwise through the bot (/start plugin).
+function initSoon() {
+  const cta = $('#soonCta');
+  const link = S.cfg.bot ? `https://t.me/${S.cfg.bot}?start=plugin` : '';
+  cta.hidden = !(link || S.cfg.dev_login);
+  if (link) cta.href = link;
+  cta.addEventListener('click', async (ev) => {
+    if (S.user) {
+      ev.preventDefault();
+      try {
+        const r = await api('/api/waitlist', { method: 'POST' });
+        haptic('success');
+        toast(r.new ? 'Готово! Напишем в Telegram, как только плагин выйдет' : 'Вы уже в списке — напишем о запуске');
+        cta.classList.add('done');
+        $('span', cta).textContent = 'Вы в списке';
+      } catch (e) { toast(e.message, true); }
+    } else if (!link) { ev.preventDefault(); openLogin(); }
+    else if (TG.app) { ev.preventDefault(); TG.app.openTelegramLink(link); }
+  });
+}
+
 // ------------------------------------------------------------------ boot
 function unavailable(msg) {
   S.unavailable = msg;
@@ -1268,16 +1346,20 @@ async function refreshRates() {
 async function boot() {
   $('#year').textContent = new Date().getFullYear();
   startBackground();
+  const miniApp = inTelegram();
   let full = true;
   try { full = !sessionStorage.getItem('sh_intro'); sessionStorage.setItem('sh_intro', '1'); } catch { /* ignore */ }
-  const intro = Promise.resolve().then(() => playIntro({ full })).catch(() => {
-    document.body.classList.remove('intro-on');
-    $('#intro')?.remove();
-  });
+  const intro = miniApp
+    ? Promise.resolve().then(() => { document.body.classList.remove('intro-on'); $('#intro')?.remove(); })  // app: no intro
+    : Promise.resolve().then(() => playIntro({ full })).catch(() => {
+      document.body.classList.remove('intro-on');
+      $('#intro')?.remove();
+    });
   $('#cta').disabled = true;
   $('#ctaText').textContent = 'Загружаем способы оплаты…';
 
   try {
+    if (miniApp) await initMiniApp();  // logs in first, so the config below already knows the user
     S.cfg = await api('/api/config');
   } catch {
     await intro;
@@ -1291,6 +1373,9 @@ async function boot() {
   if (cfg.support_url) {
     $('#supportLink').href = cfg.support_url;
     $('#supportLink').hidden = false;
+    $('#supportLink').addEventListener('click', (ev) => {  // inside Telegram open the chat in Telegram itself
+      if (TG.app && /^https:\/\/t\.me\//.test(cfg.support_url)) { ev.preventDefault(); TG.app.openTelegramLink(cfg.support_url); }
+    });
   }
   if (!cfg.currencies.length) {
     await intro;
@@ -1313,6 +1398,8 @@ async function boot() {
   if (!cfg.methods.length) unavailable('Приём оплаты скоро откроется');
   onAmount();
   renderUser();
+  initSoon();
+  i18nHooks.beforeSwitch = (lang) => (S.user ? api('/api/me/lang', { method: 'POST', body: { lang } }) : null);
   route();
   setInterval(refreshRates, 60000);
 

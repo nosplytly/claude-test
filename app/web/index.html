@@ -34,6 +34,7 @@
     <symbol id="i-percent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 5 5 19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></g></symbol>
     <symbol id="i-ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3m-3 10v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-chat" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-3.9-.9L3 20.5l1.4-4.3A8.2 8.2 0 0 1 3 11.5 8.5 8.5 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5z"/><path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01" stroke-width="2.6"/></g></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 6.5 2.5 8 2.5 8h-17S6 15.5 6 9z"/><path d="M10.3 20.5a1.9 1.9 0 0 0 3.4 0"/></g></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></symbol>
     <symbol id="i-wallet" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7V5.5A1.5 1.5 0 0 0 18.5 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a1.5 1.5 0 0 0 1.5-1.5V16"/><path d="M21 9h-5a3 3 0 0 0 0 6h5z"/></g></symbol>
     <symbol id="i-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></g></symbol>
@@ -97,6 +98,32 @@
 </header>
 
 <main class="stage">
+  <!-- coming soon: the marketplace plugin; the button puts the visitor on the bot's waiting list -->
+  <aside class="soon" id="soon" aria-labelledby="soonTitle">
+    <div class="soon-logos" aria-hidden="true">
+      <span class="soon-logo" title="FunPay">
+        <svg viewBox="0 0 100 100"><path fill="#4A86D6" d="M51 13 67.5 33H59v24L42 33h-7.5z"/><path fill="#4A86D6" d="M51 88 34.5 67h8V43l17 24h8z"/></svg>
+      </span>
+      <span class="soon-logo" title="Playerok">
+        <svg viewBox="0 0 100 100">
+          <defs><clipPath id="plP"><path d="M25 27h20a15 15 0 0 1 0 30h-9v13H25zM36 37v11h9a5.5 5.5 0 0 0 0-11z"/></clipPath></defs>
+          <path fill="#1652F0" d="M25 27h20a15 15 0 0 1 0 30h-9v13H25zM36 37v11h9a5.5 5.5 0 0 0 0-11z"/>
+          <path fill="#8AA8FF" clip-path="url(#plP)" d="M57 27h6l-7 33h-6z"/>
+          <path fill="#1652F0" d="M64 27h10.5v43H64z"/>
+          <path fill="#8AA8FF" d="M64 27h7.3L64 61.7zM74.5 33.3V70h-2.8z"/>
+        </svg>
+      </span>
+    </div>
+    <div class="soon-body">
+      <span class="soon-tag"><i></i>Скоро</span>
+      <b id="soonTitle">Плагин для FunPay и Playerok</b>
+      <p>Автовыдача пополнений Steam на FunPay и Playerok 24/7.</p>
+    </div>
+    <a class="soon-cta" id="soonCta" target="_blank" rel="noopener" hidden>
+      <svg class="i"><use href="#i-bell"/></svg><span>Узнать о запуске</span>
+    </a>
+  </aside>
+
   <section class="card" id="card" tabindex="-1" aria-label="Пополнение Steam">
 
     <!-- ===== form ===== -->

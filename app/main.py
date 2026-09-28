@@ -62,7 +62,7 @@ log = logging.getLogger("sh")
 
 def asset_version() -> str:
     h = hashlib.sha1()
-    for p in sorted((WEB / "assets").rglob("*")):
+    for p in sorted(WEB.rglob("*")):  # the pages too: an edited index.html is served without a restart
         if p.is_file():
             h.update(p.name.encode())
             h.update(str(p.stat().st_mtime_ns).encode())
@@ -168,8 +168,11 @@ async def validation_error(request: Request, exc: RequestValidationError):
     return JSONResponse({"detail": "Проверьте введённые данные"}, status_code=422)
 
 
-CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; "
-       "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+# telegram.org: the Mini App SDK script; web.telegram.org may show the site in an iframe (the Mini App in Telegram
+# Web) — nobody else may frame it
+CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+       "script-src 'self' https://telegram.org; font-src 'self'; connect-src 'self'; "
+       "frame-ancestors 'self' https://web.telegram.org https://*.web.telegram.org; base-uri 'none'; form-action 'self'")
 
 
 @app.middleware("http")
@@ -178,7 +181,6 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("Content-Security-Policy", CSP)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if settings.secure_cookies:
         resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")

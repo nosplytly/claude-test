@@ -116,7 +116,7 @@ def buttons(calls):
     for c in calls:
         kb = getattr(c, "reply_markup", None)
         for row in (kb.inline_keyboard if kb else []):
-            out += [(b.text, b.callback_data or b.url) for b in row]
+            out += [(b.text, b.callback_data or b.url or (b.web_app.url if b.web_app else None)) for b in row]  # site links open as the Mini App
     return out
 
 

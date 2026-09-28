@@ -7,6 +7,7 @@ import io
 import json
 import logging
 from decimal import Decimal
+from typing import Literal
 from urllib.parse import quote
 
 import segno
@@ -16,8 +17,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import avatars
+from . import avatars, i18n, waitlist
 from . import bot as bot_mod
+from .auth import verify_webapp
 from .auth import (LOGIN_COOKIE, LOGIN_TTL, SESSION_COOKIE, SESSION_TTL, client_ip, create_session, current_user,
                    require_user, start_login, upsert_tg_user)
 from .config import settings
@@ -240,7 +242,7 @@ async def auth_from_bot_link(t: str, k: str, request: Request, s: AsyncSession =
 
 @router.post("/api/auth/logout", dependencies=[Depends(csrf)])
 async def api_logout(request: Request, response: Response, s: AsyncSession = Depends(get_db)):
-    raw = request.cookies.get(SESSION_COOKIE)
+    raw = request.cookies.get(SESSION_COOKIE) or request.headers.get("x-sh-session")
     if raw:
         ws = await s.get(WebSession, sha256(raw))
         if ws:
@@ -253,6 +255,28 @@ async def api_logout(request: Request, response: Response, s: AsyncSession = Dep
 class DevLoginIn(BaseModel):
     tg_id: int = 1000001
     name: str = "dev"
+
+
+class WebAppIn(BaseModel):
+    init_data: str = Field(min_length=10, max_length=4096)
+
+
+@router.post("/api/auth/webapp", dependencies=[Depends(csrf)])
+async def api_auth_webapp(body: WebAppIn, request: Request, response: Response):
+    """Opened as a Telegram Mini App: log in from Telegram's signed launch data — no code to tap."""
+    hit(f"webapp:{client_ip(request)}", 30, 600)
+    tg = verify_webapp(body.init_data, settings.bot_token)
+    if not tg:
+        raise HTTPException(401, "Не удалось подтвердить вход через Telegram — откройте приложение из бота заново")
+    async with session_scope() as s:
+        user = await upsert_tg_user(s, int(tg["id"]), tg.get("username"), tg.get("first_name"), tg.get("last_name"),
+                                      tg.get("language_code"))
+        if user.is_banned:
+            raise HTTPException(403, "Аккаунт заблокирован")
+        raw = await create_session(s, user, client_ip(request), request.headers.get("user-agent", ""))
+        view = user_view(user)
+    set_cookie(response, SESSION_COOKIE, raw, int(SESSION_TTL.total_seconds()))
+    return {"user": view, "token": raw}  # the token also goes in a header where cookies can't (Telegram Web iframe)
 
 
 @router.post("/api/dev/login", dependencies=[Depends(csrf)])
@@ -313,6 +337,22 @@ async def api_avatar(user: User = Depends(require_user)):
         return Response(status_code=204, headers={"Cache-Control": "private, max-age=600"})
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
+
+class LangIn(BaseModel):
+    lang: Literal["ru", "en"]
+
+
+@router.post("/api/me/lang", dependencies=[Depends(csrf)])
+async def api_me_lang(body: LangIn, user: User = Depends(require_user)):
+    """The RU/EN switch on the site: the bot talks to this customer in the same language from now on."""
+    await i18n.choose(user.tg_id, body.lang)
+    return {"ok": True}
+
+
+@router.post("/api/waitlist", dependencies=[Depends(csrf)])
+async def api_waitlist(user: User = Depends(require_user)):
+    """"Узнать о запуске" on the FunPay / Playerok card: the signed-in customer goes on the waiting list."""
+    return {"ok": True, "new": await waitlist.join(user.tg_id, user.username)}
 
 # ------------------------------------------------------------------ orders
 

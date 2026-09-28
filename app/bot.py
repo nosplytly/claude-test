@@ -13,11 +13,11 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BotCommand, CallbackQuery, FSInputFile, Message
+from aiogram.types import BotCommand, CallbackQuery, FSInputFile, MenuButtonWebApp, Message, WebAppInfo
 from sqlalchemy import func, select
 
 from . import fail2ban as f2b
-from . import notify, tgui
+from . import i18n, notify, tgui, waitlist
 from .auth import code_choices, upsert_tg_user
 from .config import settings
 from .db import session_scope
@@ -280,7 +280,8 @@ def screen_help() -> tuple[str, object]:
                 panel(f"{e('admin')} <b>Сервис</b>",
                       "<code>/report</code> — отчёт за сегодня (каждое утро приходит сам)",
                       "<code>/backup</code> — бэкап базы прямо сейчас",
-                      "<code>/bans</code> — забаненные IP · <code>/emoji</code> — пак эмодзи"),
+                      "<code>/bans</code> — забаненные IP · <code>/emoji</code> — пак эмодзи",
+                      "<code>/waitlist</code> — кто ждёт плагин для FunPay / Playerok"),
                 "<i>Вместо @ника можно Telegram ID. Клиенту приходит уведомление об изменении баланса.</i>")
     return text, kb(back("a:home"))
 
@@ -367,6 +368,8 @@ async def start_deeplink(message: Message, command: CommandObject):
     arg = command.args or ""
     if arg.startswith("login_"):
         await handle_login(message, arg[6:])
+    elif arg == waitlist.PLUGIN:
+        await join_waitlist(message)
     else:
         await start_plain(message)
 
@@ -374,6 +377,32 @@ async def start_deeplink(message: Message, command: CommandObject):
 @router.message(CommandStart())
 async def start_plain(message: Message):
     await show(message, *await screen_home(message.from_user.id), edit=False, banner=True)
+
+
+async def join_waitlist(message: Message):
+    """"Узнать о запуске" on the site's FunPay / Playerok card: the person goes on the list for the launch news."""
+    new = await waitlist.join(message.from_user.id, message.from_user.username)
+    text = join(title("bell", "Вы в списке!" if new else "Вы уже в списке"),
+                panel("Напишу сюда, как только выйдет плагин для FunPay и Playerok."))
+    await show(message, text, kb([btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")],
+                                 [btn("Меню", cb="m:home", icon="logo")]), edit=False, banner=True)
+
+
+@router.message(Command("language"))
+async def cmd_language(message: Message):
+    await message.answer("Язык / Language", reply_markup=kb([btn("Русский", cb="lang:ru"), btn("English", cb="lang:en")]))
+
+
+@router.callback_query(F.data.startswith("lang:"))
+async def cb_language(cb: CallbackQuery):
+    lang = cb.data.split(":", 1)[1]
+    if lang not in i18n.LANGS:
+        return await cb.answer()
+    await i18n.choose(cb.from_user.id, lang)
+    i18n.current.set(lang)
+    await set_menu_button(cb.bot, cb.from_user.id, lang)
+    await cb.answer("Готово")
+    await show(cb.message, *await screen_home(cb.from_user.id), edit=True, banner=True)
 
 
 @router.message(Command("menu"))
@@ -446,7 +475,7 @@ async def login_confirm(cb: CallbackQuery):
             await cb.message.edit_text(f"{e('fail')} Код не совпал — вход отменён. Попробуйте ещё раз на сайте.")
             return await cb.answer()
         u = cb.from_user
-        user = await upsert_tg_user(s, u.id, u.username, u.first_name, u.last_name)
+        user = await upsert_tg_user(s, u.id, u.username, u.first_name, u.last_name, u.language_code)
         req.status, req.user_id, req.link_key_hash = "confirmed", user.id, sha256(link_key)
     await show(cb.message, join(title("ok", "Вход подтверждён"), panel("Возвращайтесь на сайт — вы уже вошли.")),
                kb([btn("Вернуться на сайт", url=site(f"/auth/tg?t={tok}&k={link_key}"), style=SUCCESS, icon="rocket")],
@@ -600,6 +629,29 @@ async def cmd_promo(message: Message, command: CommandObject):
                          f"{e('money')} На балансе: <b>${usd_str(new)}</b>")
 
 
+@router.message(Command("waitlist"))
+async def cmd_waitlist(message: Message, command: CommandObject):
+    """Admin: /waitlist — who waits for the FunPay / Playerok plugin; /waitlist send <text> — tell them all (once)."""
+    if not is_admin(message.from_user.id):
+        return
+    args = (command.args or "").strip()
+    if args.lower().startswith("send"):
+        text = args[4:].strip()
+        if not text:
+            return await message.answer("Формат: <code>/waitlist send Плагин вышел! Подключайте: …</code>")
+        _, waiting, _ = await waitlist.stats()
+        await message.answer(f"{e('wait')} Рассылаю {waiting} подписчикам…")
+        sent, tried = await waitlist.broadcast(text, kb([btn("Открыть сайт", url=site("/"), style=PRIMARY, icon="rocket")]))
+        return await message.answer(f"{e('ok')} Доставлено {sent} из {tried}"
+                                    + (" · остальные заблокировали бота" if sent < tried else ""))
+    total, waiting, last = await waitlist.stats()
+    names = [f"@{esc(w.username)}" if w.username else f"<code>{w.tg_id}</code>" for w in last]
+    await message.answer(join(title("bell", "Ждут плагин для FunPay / Playerok"),
+                              panel(f"В списке: <b>{total}</b> · ещё не получили новость: <b>{waiting}</b>",
+                                    ("Последние: " + ", ".join(names)) if names else "Пока никого."),
+                              "<code>/waitlist send текст</code> — разослать всем, кто ещё не получил"))
+
+
 @router.message(Command("report"))
 async def cmd_report(message: Message):
     """/report — the morning report on demand: today so far (Moscow time)."""
@@ -732,6 +784,17 @@ async def _telegram_heartbeat(make_request, bot, method):
     return result
 
 
+async def set_menu_button(bot: Bot, chat_id: int | None = None, lang: str = "ru") -> None:
+    """The button next to the message box opens the site as a Mini App: for everyone (no chat_id), or in one
+    customer's language after they picked it."""
+    if not (settings.mini_app and settings.base_url.startswith("https://")):
+        return
+    url = i18n.with_lang(settings.base_url.rstrip("/") + "/", lang) if chat_id else settings.base_url.rstrip("/") + "/"
+    with suppress(Exception):  # a cosmetic call: never worth failing the bot start or a button press over
+        await bot.set_chat_menu_button(chat_id=chat_id, menu_button=MenuButtonWebApp(
+            text="Open" if lang == "en" else "Открыть", web_app=WebAppInfo(url=url)))
+
+
 async def run_bot() -> None:
     global bot_username, _dp
     if not settings.bot_token:
@@ -739,14 +802,20 @@ async def run_bot() -> None:
         return
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     bot.session.middleware(_telegram_heartbeat)
+    bot.session.middleware(i18n.outgoing)  # English for customers whose Telegram speaks English
     me = await bot.get_me()
     bot_username = me.username
     notify.set_bot(bot)
     log.info("bot @%s started", bot_username)
     await load_pack(bot)
-    await bot.set_my_commands([BotCommand(command="start", description="Меню")])
+    await bot.set_my_commands([BotCommand(command="start", description="Меню"),
+                               BotCommand(command="language", description="Язык / Language")])
+    await bot.set_my_commands([BotCommand(command="start", description="Menu"),
+                               BotCommand(command="language", description="Language / Язык")], language_code="en")
+    await set_menu_button(bot)
     if _dp is None:  # once per process: run_bot restarts after a crash, and a router can't be attached twice
         _dp = Dispatcher()
+        _dp.update.outer_middleware(i18n.TrackLanguage())
         _dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=False)
     await _dp.start_polling(bot, handle_signals=False)

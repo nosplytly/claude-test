@@ -48,6 +48,8 @@ class User(TimestampMixin, Base):
     discount: Mapped[Decimal | None] = mapped_column(DecText)  # personal discount %, overrides CLIENT_DISCOUNT
     webhook_url: Mapped[str | None] = mapped_column(String(500))
     webhook_secret: Mapped[str | None] = mapped_column(String(80))
+    lang: Mapped[str | None] = mapped_column(String(8))  # "ru" / "en" picked by the client (bot /language, site switch)
+    tg_lang: Mapped[str | None] = mapped_column(String(16))  # their Telegram app's language: the default when not picked
 
     @property
     def display_name(self) -> str:
@@ -269,3 +271,16 @@ class KV(Base):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class Waitlist(Base):
+    """Who asked to hear about something that isn't out yet (the FunPay / Playerok plugin): one row per person."""
+    __tablename__ = "waitlist"
+    __table_args__ = (Index("ux_waitlist_topic_tg", "topic", "tg_id", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    topic: Mapped[str] = mapped_column(String(32))
+    tg_id: Mapped[int] = mapped_column(BigInteger)
+    username: Mapped[str | None] = mapped_column(String(64))
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

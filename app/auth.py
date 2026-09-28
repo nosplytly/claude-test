@@ -48,14 +48,48 @@ def code_choices(code: str) -> list[str]:
 
 
 async def upsert_tg_user(s: AsyncSession, tg_id: int, username: str | None, first: str | None,
-                         last: str | None) -> User:
+                         last: str | None, lang_code: str | None = None) -> User:
     u = (await s.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
     if not u:
         u = User(tg_id=tg_id)
         s.add(u)
     u.username, u.first_name, u.last_name, u.bot_blocked = username, first, last, False
+    if lang_code:
+        u.tg_lang = lang_code
     await s.flush()
     return u
+
+
+WEBAPP_MAX_AGE = 24 * 3600
+
+
+def verify_webapp(init_data: str, bot_token: str, max_age: int = WEBAPP_MAX_AGE) -> dict | None:
+    """Telegram Mini App login: `initData` is signed with a key derived from our bot token
+    (core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app). Returns the Telegram user or None."""
+    import hashlib
+    import hmac
+    import json
+    import time
+    from urllib.parse import parse_qsl
+
+    if not bot_token or not init_data:
+        return None
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=True))
+    except ValueError:
+        return None
+    got = pairs.pop("hash", "")
+    check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    if not got or not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), got):
+        return None
+    try:
+        if time.time() - int(pairs.get("auth_date", "0")) > max_age:
+            return None  # an old launch link replayed
+        user = json.loads(pairs.get("user", ""))
+        return user if isinstance(user, dict) and int(user.get("id", 0)) > 0 else None
+    except (ValueError, TypeError):
+        return None
 
 
 async def create_session(s: AsyncSession, user: User, ip: str, ua: str) -> str:
@@ -79,7 +113,9 @@ async def user_from_session(s: AsyncSession, raw: str | None) -> User | None:
 async def current_user(request: Request) -> User | None:
     """Own short session: the connection is back in the pool before the endpoint runs. An endpoint may wait on the
     supplier for seconds, and a connection held that long by every request starves the pool under load."""
-    raw = request.cookies.get(SESSION_COOKIE)
+    # the cookie, or the header the Mini App sends (inside Telegram Web the site runs in a cross-site iframe,
+    # where browsers don't send its cookies)
+    raw = request.cookies.get(SESSION_COOKIE) or request.headers.get("x-sh-session")
     if not raw:
         return None
     async with SessionLocal() as s:

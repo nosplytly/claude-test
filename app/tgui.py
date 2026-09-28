@@ -17,7 +17,7 @@ import logging
 import re
 from pathlib import Path
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 log = logging.getLogger("sh.tgui")
 
@@ -29,7 +29,7 @@ EMOJI: dict[str, str] = {
     "user": "👤", "margin": "📈", "ok": "✅", "fail": "❌", "wait": "⏳", "queue": "⏸", "warn": "⚠️",
     "alarm": "🚨", "question": "❓", "claim": "🧾", "low": "🔻", "net": "📡", "new": "🟦", "lock": "🔐",
     "cancel": "✖️", "retry": "🔁", "refund": "↩️", "link": "🔗", "gift": "🎁", "fire": "🔥", "clock": "🕒",
-    "tx": "🔎", "coin": "🪙", "sparkle": "✨", "turtle": "🐢", "key": "🔑", "hello": "👋", "swap": "💱",
+    "tx": "🔎", "coin": "🪙", "sparkle": "✨", "turtle": "🐢", "key": "🔑", "hello": "👋", "swap": "💱", "bell": "🔔",
 }
 
 _ids: dict[str, str] = {}
@@ -109,7 +109,9 @@ PRIMARY, SUCCESS, DANGER = "primary", "success", "danger"  # blue, green, red
 def btn(text: str, *, cb: str | None = None, url: str | None = None, style: str | None = None,
         icon: str | None = None) -> InlineKeyboardButton | None:
     """Button with optional colour and emoji: the pack's emoji becomes the button's icon, otherwise the standard
-    emoji goes in front of the text. URL buttons need https (Telegram rejects localhost links) — else None."""
+    emoji goes in front of the text. URL buttons need https (Telegram rejects localhost links) — else None.
+    A link into our own site opens it as the Mini App inside Telegram (logged in, no code) — except /auth/…,
+    which exists to log a *browser* in."""
     if url is not None and not url.startswith("https://"):
         return None
     cid = _ids.get(icon) if (icon and _enabled) else None
@@ -117,7 +119,13 @@ def btn(text: str, *, cb: str | None = None, url: str | None = None, style: str 
     if cb is not None:
         kw["callback_data"] = cb
     if url is not None:
-        kw["url"] = url
+        from .config import settings
+
+        home = settings.base_url.rstrip("/")
+        if settings.mini_app and (url == home or url.startswith(home + "/")) and not url.startswith(home + "/auth/"):
+            kw["web_app"] = WebAppInfo(url=url)
+        else:
+            kw["url"] = url
     if style:
         kw["style"] = style
     if cid:

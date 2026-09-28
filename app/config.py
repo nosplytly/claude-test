@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     # --- bot look: quote plates around message blocks. Telegram colours them by the bot's id (ours: red, not
     # changeable), so they're off; turn on for a bot whose colour fits ---
     tg_panels: bool = False
+    # --- links to the site in the bot open it as a Telegram Mini App (logged in automatically); needs https ---
+    mini_app: bool = True
 
     # --- database connection pool (SQLite: one writer at a time; readers in parallel) ---
     db_pool_size: int = 10
