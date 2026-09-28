@@ -367,7 +367,7 @@ $('#userMenu').addEventListener('click', async (e) => {
   if (act === 'deposit') location.hash = '#/deposit';
   if (act === 'logout') {
     await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
-    S.user = null; renderUser(); location.hash = '#/'; toast('Вы вышли');
+    S.user = null; renderUser(); markSoon(false); location.hash = '#/'; toast('Вы вышли');
   }
 });
 $('#loginBtn').addEventListener('click', () => openLogin());
@@ -446,6 +446,7 @@ function openLogin() {
 function onLoggedIn(user) {
   S.user = user;
   renderUser();
+  api('/api/waitlist').then((r) => markSoon(r.joined)).catch(() => {});  // maybe joined through the bot earlier
   toast(`Вы вошли: ${user.name}`);
   if (S.pendingSubmit) { S.pendingSubmit = false; submitOrder(); }
   else route();
@@ -1307,11 +1308,18 @@ document.addEventListener('click', (e) => {
 
 // ------------------------------------------------------------------ coming soon: the FunPay / Playerok plugin
 // "Узнать о запуске": signed in — straight onto the waiting list; otherwise through the bot (/start plugin).
+function markSoon(joined) {
+  const cta = $('#soonCta');
+  cta.classList.toggle('done', joined);
+  $('span', cta).textContent = joined ? 'Вы в списке' : 'Узнать о запуске';
+}
+
 function initSoon() {
   const cta = $('#soonCta');
   const link = S.cfg.bot ? `https://t.me/${S.cfg.bot}?start=plugin` : '';
   cta.hidden = !(link || S.cfg.dev_login);
   if (link) cta.href = link;
+  markSoon(!!S.cfg.waitlist);  // the server remembers, so the card says so after a reload too
   cta.addEventListener('click', async (ev) => {
     if (S.user) {
       ev.preventDefault();
@@ -1319,8 +1327,7 @@ function initSoon() {
         const r = await api('/api/waitlist', { method: 'POST' });
         haptic('success');
         toast(r.new ? 'Готово! Напишем в Telegram, как только плагин выйдет' : 'Вы уже в списке — напишем о запуске');
-        cta.classList.add('done');
-        $('span', cta).textContent = 'Вы в списке';
+        markSoon(true);
       } catch (e) { toast(e.message, true); }
     } else if (!link) { ev.preventDefault(); openLogin(); }
     else if (TG.app) { ev.preventDefault(); TG.app.openTelegramLink(link); }

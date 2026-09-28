@@ -362,6 +362,16 @@ async def main():
         check(r.status_code == 200 and r.json()["new"] is False, "с сайта (уже в списке через бота) — не дублируется")
         r = await c.post("/api/waitlist", headers={"X-SH": "1"})
         check(r.status_code == 401, "с сайта без входа — только через бота")
+        r = await c.get("/api/waitlist", headers={"X-SH-Session": tok})
+        check(r.json() == {"joined": True}, "после перезагрузки сайт знает: «Вы в списке» (записался через бота)")
+        r = await c.get("/api/config", headers={"X-SH-Session": tok})
+        check(r.json()["waitlist"] is True, "…и отдаёт это сразу с настройками страницы — без мигания кнопки")
+        r = await c.get("/api/waitlist")
+        check(r.json() == {"joined": False}, "без входа — «не в списке», без ошибки")
+        async with session_scope() as s:
+            tok2 = await create_session(s, await s.get(DbUser, en2.id), "203.0.113.9", "test")
+        r = await c.get("/api/config", headers={"X-SH-Session": tok2})
+        check(r.json()["waitlist"] is False, "тот, кто не записывался, видит «Узнать о запуске»")
     async with session_scope() as s:
         check(len((await s.execute(select(Waitlist))).scalars().all()) == 2, "в списке ровно 2 человека")
     check("Ждут плагин" in visible(await send_text(ADMIN, "/waitlist")), "админ видит список (/waitlist)")

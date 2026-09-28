@@ -32,6 +32,11 @@ async def join(tg_id: int, username: str | None, topic: str = PLUGIN) -> bool:
         return False
 
 
+async def has(tg_id: int, topic: str = PLUGIN) -> bool:
+    async with session_scope() as s:
+        return (await s.execute(select(Waitlist.id).where(Waitlist.topic == topic, Waitlist.tg_id == tg_id))).first() is not None
+
+
 async def stats(topic: str = PLUGIN) -> tuple[int, int, list[Waitlist]]:
     """(on the list, not told yet, the latest few)."""
     async with session_scope() as s:

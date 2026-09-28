@@ -147,7 +147,8 @@ async def api_config(user: User | None = Depends(current_user)):
             "dev_pay": settings.is_dev and settings.nervixy_mock,
             "support_url": settings.support_url or None, "invoice_ttl_min": settings.invoice_ttl_min,
             "deposit_min": plain(settings.min_deposit_usd), "deposit_max": plain(settings.max_deposit_usd),
-            "user": user_view(user), "available": bool(rates_out)}
+            "user": user_view(user), "available": bool(rates_out),
+            "waitlist": await waitlist.has(user.tg_id) if user else False}  # the plugin card: "Вы в списке" after a reload
 
 
 @router.get("/api/rates")
@@ -347,6 +348,12 @@ async def api_me_lang(body: LangIn, user: User = Depends(require_user)):
     """The RU/EN switch on the site: the bot talks to this customer in the same language from now on."""
     await i18n.choose(user.tg_id, body.lang)
     return {"ok": True}
+
+
+@router.get("/api/waitlist")
+async def api_waitlist_status(user: User | None = Depends(current_user)):
+    """Right after signing in: is this customer already waiting for the plugin (maybe joined through the bot)?"""
+    return {"joined": await waitlist.has(user.tg_id) if user else False}
 
 
 @router.post("/api/waitlist", dependencies=[Depends(csrf)])
