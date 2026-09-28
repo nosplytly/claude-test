@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SupplierHub — пополнение Steam криптовалютой</title>
+<meta name="description" content="Пополнение баланса Steam криптовалютой со скидкой. USDT, BTC, ETH, TON, SOL, LTC, TRX. Вход через Telegram.">
+<meta name="theme-color" content="#0B0B0C">
+<meta property="og:title" content="SupplierHub — пополнение Steam криптой">
+<meta property="og:description" content="Пополняйте Steam криптовалютой со скидкой.">
+<link rel="icon" href="/assets/img/favicon.svg?v={{v}}" type="image/svg+xml">
+<link rel="preload" href="/assets/fonts/manrope-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/app.css?v={{v}}">
+<script type="module" src="/assets/app.js?v={{v}}"></script>
+</head>
+<body class="intro-on">
+<a class="skip-link" href="#card">К форме пополнения</a>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="g-ring" viewBox="0 0 100 100"><circle cx="50" cy="50" r="20" fill="none" stroke="currentColor" stroke-width="13"/></symbol>
+    <symbol id="g-diamond" viewBox="0 0 100 100"><path d="M50 22 78 50 50 78 22 50z" fill="currentColor"/></symbol>
+    <symbol id="g-rect" viewBox="0 0 100 100"><rect x="23.5" y="32.5" width="53" height="35" rx="8" fill="currentColor"/></symbol>
+    <symbol id="g-plus" viewBox="0 0 100 100"><path d="M50 28v44M28 50h44" stroke="currentColor" stroke-width="14" stroke-linecap="round" fill="none"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2.5"/><path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5m7 7-7-7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2zM9 8h6m-6 4h6m-6 4h3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4m0 4h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zm-3-10 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-percent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 5 5 19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></g></symbol>
+    <symbol id="i-ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3m-3 10v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></symbol>
+    <symbol id="i-wallet" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7V5.5A1.5 1.5 0 0 0 18.5 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a1.5 1.5 0 0 0 1.5-1.5V16"/><path d="M21 9h-5a3 3 0 0 0 0 6h5z"/></g></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></g></symbol>
+    <symbol id="i-steam" viewBox="0 0 24 24"><path fill="currentColor" d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z"/></symbol>
+    <symbol id="i-tg" viewBox="0 0 24 24"><path fill="currentColor" d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></symbol>
+  </defs>
+</svg>
+
+<!-- intro (replays the brand animation; skippable, shown in full once per session) -->
+<div id="intro" aria-hidden="true">
+  <div class="lockup" id="introLockup">
+    <div class="mark">
+      <span class="tile"><svg><use href="#g-ring"/></svg></span>
+      <span class="tile"><svg><use href="#g-diamond"/></svg></span>
+      <span class="tile"><svg><use href="#g-rect"/></svg></span>
+      <span class="tile blue"><svg><use href="#g-plus"/></svg></span>
+      <span class="seed"></span>
+      <span class="ring-pulse"></span>
+    </div>
+    <div class="word"><b>SupplierHub</b><small>автовыдача цифровых товаров</small></div>
+  </div>
+</div>
+
+<div class="bg" aria-hidden="true">
+  <div class="bg-glow"></div>
+  <div class="bg-grid"></div>
+  <div class="bg-grid-hi"></div>
+  <div class="bg-tiles" id="bgTiles"></div>
+</div>
+
+<header class="top">
+  <a class="lockup" href="#/" id="brand" aria-label="SupplierHub — на главную">
+    <div class="mark" aria-hidden="true">
+      <span class="tile"><svg><use href="#g-ring"/></svg></span>
+      <span class="tile"><svg><use href="#g-diamond"/></svg></span>
+      <span class="tile"><svg><use href="#g-rect"/></svg></span>
+      <span class="tile blue"><svg><use href="#g-plus"/></svg></span>
+    </div>
+    <div class="word"><b>SupplierHub</b><small>автовыдача цифровых товаров</small></div>
+  </a>
+  <nav class="top-actions">
+    <a class="link" id="supportLink" target="_blank" rel="noopener" hidden>Поддержка</a>
+    <button class="btn-ghost" id="loginBtn" type="button"><svg class="i"><use href="#i-tg"/></svg>Войти</button>
+    <div class="user-chip" id="userChip" hidden>
+      <button class="user-btn" id="userBtn" type="button" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar" id="avatar"></span>
+        <span class="user-meta"><b id="userName"></b><span id="userBal" class="num"></span></span>
+      </button>
+      <div class="menu" id="userMenu" role="menu" hidden>
+        <button type="button" role="menuitem" data-act="orders"><svg class="i"><use href="#i-list"/></svg>Мои заказы</button>
+        <button type="button" role="menuitem" data-act="deposit"><svg class="i"><use href="#i-wallet"/></svg>Пополнить баланс</button>
+        <button type="button" role="menuitem" data-act="balance"><svg class="i"><use href="#i-clock"/></svg>История баланса</button>
+        <button type="button" role="menuitem" data-act="api"><svg class="i"><use href="#i-bolt"/></svg>API для партнёров</button>
+        <button type="button" role="menuitem" data-act="logout" class="muted"><svg class="i"><use href="#i-out"/></svg>Выйти</button>
+      </div>
+    </div>
+  </nav>
+</header>
+
+<main class="stage">
+  <section class="card" id="card" tabindex="-1" aria-label="Пополнение Steam">
+
+    <!-- ===== form ===== -->
+    <form class="view" id="viewForm" novalidate autocomplete="off">
+      <div class="card-head">
+        <div class="steam-tile" aria-hidden="true"><svg><use href="#i-steam"/></svg></div>
+        <div>
+          <h1>Пополнение Steam</h1>
+        </div>
+        <div class="badge" id="discountBadge" title="Скидка от номинала">—</div>
+      </div>
+
+      <div class="field" id="fLogin">
+        <label for="login">Логин Steam</label>
+        <div class="input-wrap">
+          <input class="input" id="login" name="login" maxlength="64" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="Например, gaben" aria-describedby="loginHint">
+          <span class="state" id="loginState" aria-hidden="true"></span>
+        </div>
+        <p class="hint" id="loginHint" aria-live="polite">Логин для входа в Steam, <b>не никнейм</b>. <button type="button" class="link-btn" id="whereLogin">Где найти?</button></p>
+      </div>
+
+      <div class="field">
+        <span class="label" id="curLabel">Валюта аккаунта Steam</span>
+        <div class="seg" id="curSeg" role="radiogroup" aria-labelledby="curLabel"><span class="seg-thumb" id="segThumb"></span></div>
+      </div>
+
+      <div class="field" id="fAmount">
+        <label for="amount">Сумма пополнения</label>
+        <div class="amount-wrap">
+          <input class="input num" id="amount" name="amount" inputmode="decimal" placeholder="1000" aria-describedby="amountHint">
+          <span class="amount-sign" id="amountSign">₽</span>
+        </div>
+        <div class="chips" id="chips"></div>
+        <p class="hint" id="amountHint" aria-live="polite"></p>
+      </div>
+
+      <div class="field" id="fMethod">
+        <span class="label" id="coinLabel">Чем оплатите</span>
+        <div class="coins" id="coins" role="radiogroup" aria-labelledby="coinLabel"></div>
+        <div class="nets-wrap" id="netsWrap"><div><span class="network-label">Сеть перевода</span><div class="nets" id="nets" role="radiogroup" aria-label="Сеть"></div></div></div>
+        <p class="hint err" id="methodHint" hidden></p>
+      </div>
+
+      <div class="summary" id="summary">
+        <div class="sum-row"><span>Зачислим в Steam</span><b class="num" id="sGet">—</b></div>
+        <div class="sum-row"><span>Цена со скидкой</span><b class="num" id="sPrice">—</b></div>
+        <div class="sum-row" id="sBalRow" hidden><span>С баланса сайта</span><b class="num" id="sBal">—</b></div>
+        <div class="sum-row total"><span>К оплате</span><b class="num" id="sPay">—</b></div>
+        <div class="sum-row save"><span>Ваша выгода</span><b class="num" id="sSave">—</b></div>
+        <div class="sum-note" id="sNote"></div>
+      </div>
+
+      <button class="cta" id="cta" type="submit"><span class="plus"><svg><use href="#i-plus"/></svg></span><span id="ctaText">Перейти к оплате</span></button>
+      <p class="fine">Продолжая, вы принимаете <button type="button" class="link-btn" data-open="terms">условия сервиса</button></p>
+    </form>
+
+    <!-- ===== balance top-up ===== -->
+    <form class="view" id="viewDeposit" hidden novalidate autocomplete="off">
+      <div class="pay-top">
+        <button class="icon-btn" type="button" data-go="#/" aria-label="Назад"><svg class="i"><use href="#i-back"/></svg></button>
+        <div class="pay-title"><b>Пополнение баланса</b><span>Баланс оплачивает заказы — на сайте и через API</span></div>
+      </div>
+      <div class="field" id="fDep">
+        <label for="depAmount">Сумма пополнения</label>
+        <div class="amount-wrap">
+          <input class="input num" id="depAmount" inputmode="decimal" placeholder="25" aria-describedby="depHint">
+          <span class="amount-sign">$</span>
+        </div>
+        <div class="chips" id="depChips"></div>
+        <p class="hint" id="depHint"></p>
+      </div>
+      <div class="field">
+        <span class="label" id="depCoinLabel">Чем оплатите</span>
+        <div class="coins" id="depCoins" role="radiogroup" aria-labelledby="depCoinLabel"></div>
+        <div class="nets-wrap" id="depNetsWrap"><div><div class="nets" id="depNets" role="radiogroup" aria-label="Сеть"></div></div></div>
+      </div>
+      <div class="summary">
+        <div class="sum-row"><span>Сейчас на балансе</span><b class="num" id="depNow">—</b></div>
+        <div class="sum-row"><span>Станет после оплаты</span><b class="num" id="depAfter">—</b></div>
+        <div class="sum-row total"><span>К оплате</span><b class="num" id="depPay">—</b></div>
+        <div class="sum-note" id="depNote"></div>
+      </div>
+      <button class="cta" id="depCta" type="submit"><span class="plus"><svg><use href="#i-plus"/></svg></span><span id="depCtaText">Создать счёт</span></button>
+    </form>
+
+    <!-- ===== payment ===== -->
+    <div class="view" id="viewPay" hidden>
+      <div class="pay-top">
+        <button class="icon-btn" type="button" id="payBack" aria-label="Назад к форме"><svg class="i"><use href="#i-back"/></svg></button>
+        <div class="pay-title"><b id="payTitle">Заказ</b><span id="paySub"></span></div>
+        <div class="timer" id="timer" aria-label="Время на оплату" aria-live="off">
+          <svg viewBox="0 0 50 50"><circle class="track" cx="25" cy="25" r="21"/><circle class="bar" id="timerBar" cx="25" cy="25" r="21"/></svg>
+          <span class="num" id="timerText">30:00</span>
+        </div>
+      </div>
+
+      <div class="steps" id="steps">
+        <div class="prog" id="stepsProg"></div>
+        <div class="step" data-s="0"><span class="dot"><svg><use href="#g-ring"/></svg></span>Счёт</div>
+        <div class="step" data-s="1"><span class="dot"><svg><use href="#g-diamond"/></svg></span>Оплата</div>
+        <div class="step" data-s="2"><span class="dot"><svg><use href="#g-rect"/></svg></span><span id="step2Label">Пополнение</span></div>
+        <div class="step" data-s="3"><span class="dot"><svg><use href="#g-plus"/></svg></span>Готово</div>
+      </div>
+
+      <div id="payInvoice">
+        <div class="pay-body">
+          <div class="qr"><img id="payQr" alt="QR-код для оплаты" width="144" height="144"><span class="coin-badge"><img id="payQrCoin" alt=""></span></div>
+          <div>
+            <div class="pf">
+              <span class="label">Отправьте ровно</span>
+              <button type="button" class="copy big" id="copyAmount"><span class="v num"><span id="payAmount"></span><em id="payCoin"></em></span><span class="ic"><svg class="i"><use href="#i-copy"/></svg></span></button>
+            </div>
+            <div class="pf">
+              <span class="label">Сеть</span>
+              <div class="net-line"><img id="payNetIcon" alt=""><span id="payNet"></span></div>
+            </div>
+          </div>
+        </div>
+        <div class="pf">
+          <span class="label">На адрес</span>
+          <button type="button" class="copy" id="copyAddr"><span class="v mono" id="payAddr"></span><span class="ic"><svg class="i"><use href="#i-copy"/></svg></span></button>
+        </div>
+        <div class="pf" id="payMemoBox" hidden>
+          <span class="label">Комментарий (memo)</span>
+          <button type="button" class="copy" id="copyMemo"><span class="v mono" id="payMemo"></span><span class="ic"><svg class="i"><use href="#i-copy"/></svg></span></button>
+          <small>Укажите, если кошелёк позволяет — так платёж найдётся даже при неточной сумме.</small>
+        </div>
+        <div class="warn-box"><svg class="i"><use href="#i-warn"/></svg><span id="payWarn"></span></div>
+      </div>
+
+      <div class="status" id="payStatus" role="status" aria-live="polite"><span class="spin"></span><div><b id="stTitle">Ожидаем платёж</b><span id="stText"></span></div></div>
+
+      <div class="pay-actions">
+        <button type="button" class="txt-btn" id="claimBtn">Отправили, а платёж не находится?</button>
+        <button type="button" class="txt-btn danger" id="cancelBtn">Отменить заказ</button>
+        <button type="button" class="txt-btn" id="devPayBtn" hidden>⚙ Симулировать оплату (dev)</button>
+      </div>
+    </div>
+
+    <!-- ===== result ===== -->
+    <div class="view result" id="viewResult" hidden>
+      <div class="done-mark" id="resMark">
+        <span class="tile"></span><span class="tile"></span><span class="tile"></span><span class="tile blue"></span>
+        <span class="big"><svg viewBox="0 0 24 24" id="resIcon"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      </div>
+      <h2 id="resTitle">Готово!</h2>
+      <p id="resText"></p>
+      <button type="button" class="cta" id="resMain"><span class="plus"><svg><use href="#i-plus"/></svg></span><span id="resMainText">Пополнить ещё</span></button>
+      <button type="button" class="cta secondary" id="resSecond" hidden>Мои заказы</button>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span>© <span id="year"></span> SupplierHub</span>
+  <a id="supportFoot" target="_blank" rel="noopener" hidden>Поддержка</a>
+  <button type="button" data-open="terms">Условия</button>
+  <button type="button" data-open="faq">Как это работает</button>
+  <a href="/api-docs">API</a>
+</footer>
+
+<!-- ===== templates for modals ===== -->
+<template id="tplLogin">
+  <div class="overlay" data-close><div class="modal" role="dialog" aria-modal="true" aria-labelledby="lmTitle">
+    <button class="icon-btn close" type="button" data-close aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button>
+    <h3 id="lmTitle">Вход через Telegram</h3>
+    <p class="lm-text">Откройте бота и нажмите в нём этот код:</p>
+    <div class="code-tile num lm-code">··</div>
+    <a class="cta tg-btn lm-open" target="_blank" rel="noopener"><svg><use href="#i-tg"/></svg>Открыть Telegram</a>
+    <div class="login-wait"><span class="spin"></span><span class="lm-wait">Ждём подтверждения в боте…</span></div>
+  </div></div>
+</template>
+
+<template id="tplDevLogin">
+  <div class="overlay" data-close><div class="modal" role="dialog" aria-modal="true">
+    <button class="icon-btn close" type="button" data-close aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button>
+    <h3>Dev-вход</h3>
+    <p>Бот не настроен (нет BOT_TOKEN), поэтому локально можно войти тестовым пользователем.</p>
+    <button class="cta dev-go" type="button"><span class="plus"><svg><use href="#i-plus"/></svg></span>Войти как тестовый пользователь</button>
+  </div></div>
+</template>
+
+<template id="tplWhere">
+  <div class="overlay" data-close><div class="modal" role="dialog" aria-modal="true" aria-labelledby="whTitle">
+    <button class="icon-btn close" type="button" data-close aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button>
+    <h3 id="whTitle">Где найти логин Steam</h3>
+    <p>Нужен именно логин — то, что вы вводите при входе в Steam. Никнейм профиля не подойдёт.</p>
+    <ol>
+      <li>Откройте Steam или <b>store.steampowered.com</b></li>
+      <li>Нажмите на своё имя в правом верхнем углу → <b>Об аккаунте</b></li>
+      <li>Логин указан в заголовке: <b>«Аккаунт ВАШ_ЛОГИН»</b></li>
+    </ol>
+  </div></div>
+</template>
+
+<template id="tplClaim">
+  <div class="overlay" data-close><div class="modal" role="dialog" aria-modal="true" aria-labelledby="clTitle">
+    <button class="icon-btn close" type="button" data-close aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button>
+    <h3 id="clTitle">Платёж не находится?</h3>
+    <p>Так бывает, если отправлена не та сумма (например, биржа удержала комиссию). Вставьте хэш транзакции — мы найдём её в сети и зачислим деньги после проверки.</p>
+    <div class="field"><label for="txid">Хэш транзакции (TxID)</label><input class="input txid" id="txid" spellcheck="false" autocomplete="off" placeholder="0x… / хэш из кошелька или биржи"></div>
+    <button class="cta cl-go" type="button"><span class="plus"><svg><use href="#i-plus"/></svg></span>Отправить на проверку</button>
+  </div></div>
+</template>
+
+<template id="tplCabinet">
+  <div class="overlay" data-close style="justify-content:flex-end;padding:0"><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="cbTitle">
+    <div class="drawer-head"><h3 id="cbTitle">Кабинет</h3><button class="icon-btn" type="button" data-close aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button></div>
+    <div class="seg cb-tabs" role="tablist">
+      <span class="seg-thumb"></span>
+      <button type="button" role="tab" data-tab="orders">Заказы</button>
+      <button type="button" role="tab" data-tab="balance">Баланс</button>
+      <button type="button" role="tab" data-tab="api">API</button>
+    </div>
+    <div class="drawer-body">
+      <section data-pane="orders"><div class="cb-orders"><div class="empty"><span class="spin" style="display:inline-block"></span></div></div></section>
+      <section data-pane="balance" hidden>
+        <div class="balance-box"><span>Баланс сайта</span><b class="num cb-bal">$0.00</b><small>Автоматически оплачивает следующие заказы — на сайте и через API</small>
+          <button type="button" class="btn-sm primary cb-deposit"><svg><use href="#i-plus"/></svg>Пополнить баланс</button></div>
+        <div class="cb-history"></div>
+      </section>
+      <section data-pane="api" hidden><div class="cb-api"><div class="empty"><span class="spin" style="display:inline-block"></span></div></div></section>
+    </div>
+  </aside></div>
+</template>
+
+<template id="tplTerms">
+  <div class="overlay" data-close><div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="tmTitle">
+    <button class="icon-btn close" type="button" data-close aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button>
+    <h3 id="tmTitle">Условия сервиса</h3>
+    <div class="terms">
+      <p>SupplierHub оказывает услугу пополнения баланса Steam-аккаунта по указанному пользователем логину. Оплата принимается в криптовалюте.</p>
+      <h4>Заказ и оплата</h4>
+      <p>Сумма к оплате фиксируется на время действия счёта. Отправляйте ровно указанную сумму в указанной сети — средства, отправленные в другой сети или другой монетой, могут быть утеряны.</p>
+      <h4>Исполнение</h4>
+      <p>После подтверждения платежа в сети пополнение выполняется автоматически. Пользователь отвечает за правильность указанного логина.</p>
+      <h4>Возвраты</h4>
+      <p>Если пополнение не удалось, стоимость заказа возвращается на баланс сайта и может быть использована для нового заказа. Платёж, пришедший после истечения счёта, также зачисляется на баланс.</p>
+      <h4>Поддержка</h4>
+      <p>По любым вопросам пишите в поддержку — ссылка внизу страницы.</p>
+    </div>
+  </div></div>
+</template>
+
+<template id="tplFaq">
+  <div class="overlay" data-close><div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="fqTitle">
+    <button class="icon-btn close" type="button" data-close aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button>
+    <h3 id="fqTitle">Как это работает</h3>
+    <div class="terms">
+      <h4>1. Логин и сумма</h4><p>Укажите логин Steam — мы сразу проверим, что аккаунт можно пополнить. Выберите валюту аккаунта и сумму.</p>
+      <h4>2. Оплата криптой</h4><p>Выберите монету и сеть. Мы покажем точную сумму, адрес и QR-код. Сумма уникальна — по ней мы автоматически узнаём ваш платёж.</p>
+      <h4>3. Пополнение</h4><p>Как только платёж подтвердится в сети, Steam пополнится автоматически. Статус виден на сайте, уведомление придёт в Telegram.</p>
+      <h4>Если что-то пошло не так</h4><p>Деньги не пропадают: при любой ошибке они возвращаются на баланс сайта. Им можно оплатить следующий заказ.</p>
+    </div>
+  </div></div>
+</template>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>
