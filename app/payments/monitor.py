@@ -439,7 +439,10 @@ class Monitor:
                 await asyncio.sleep(min(2.0, max(0.2, target - time.time())))
 
     async def _settle_loop(self) -> None:
+        from .. import health
+
         while True:
+            health.beat("settle")
             await settle(self.watchers)
             await asyncio.sleep(2)
 

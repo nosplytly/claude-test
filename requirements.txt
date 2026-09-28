@@ -7,3 +7,4 @@ pydantic-settings>=2.3
 aiogram>=3.13
 segno>=1.6
 base58>=2.1
+cryptography>=43

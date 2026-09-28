@@ -14,7 +14,7 @@ from .db import session_scope
 from .models import User
 from .tgui import esc  # noqa: F401  (re-exported: other modules import esc from here)
 
-__all__ = ["esc", "send", "edit", "notify_user", "notify_admins", "set_bot", "current_bot"]
+__all__ = ["esc", "send", "send_document", "edit", "notify_user", "notify_admins", "set_bot", "current_bot"]
 log = logging.getLogger("sh.notify")
 
 # legacy button spec: (text, "cb:<data>" | "url:<https://...>"[, style[, emoji key]])
@@ -78,6 +78,29 @@ async def send(chat_id: int, text: str, buttons=None) -> int | None:
                 u = (await s.execute(select(User).where(User.tg_id == chat_id))).scalar_one_or_none()
                 if u:
                     u.bot_blocked = True
+        return None
+
+
+async def send_document(chat_id: int, data: bytes, filename: str, caption: str = "") -> int | None:
+    """Send a file (e.g. the encrypted DB backup); returns the message_id or None."""
+    if _bot is None:
+        log.info("[tg file -> %s] %s (%d bytes)", chat_id, filename, len(data))
+        return None
+    from aiogram.types import BufferedInputFile
+
+    try:
+        msg = await _bot.send_document(chat_id, BufferedInputFile(data, filename=filename), caption=caption or None)
+        return msg.message_id
+    except Exception as e:  # noqa: BLE001
+        if caption and _emoji_problem(e):
+            tgui.disable_custom()
+            try:
+                msg = await _bot.send_document(chat_id, BufferedInputFile(data, filename=filename),
+                                               caption=tgui.strip_custom(caption))
+                return msg.message_id
+            except Exception as e2:  # noqa: BLE001
+                e = e2
+        log.warning("telegram document to %s failed: %s", chat_id, e)
         return None
 
 

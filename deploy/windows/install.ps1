@@ -57,6 +57,26 @@ foreach ($f in @("certs\fullchain.pem", "certs\privkey.pem")) {
 }
 Ok "ok"
 
+# ---------------------------------------------------------------- backup password (generated here, shown once)
+if ($envText -notmatch '(?m)^\s*BACKUP_PASSWORD\s*=\s*\S+') {
+  Step "Пароль для бэкапов"
+  $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_.!@%^*+'.ToCharArray()
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  $limit = 256 - (256 % $chars.Length)
+  $sb = New-Object Text.StringBuilder
+  $buf = New-Object byte[] 1
+  while ($sb.Length -lt 32) { $rng.GetBytes($buf); if ($buf[0] -lt $limit) { [void]$sb.Append($chars[$buf[0] % $chars.Length]) } }
+  $bp = $sb.ToString()
+  if ($envText -match '(?m)^\s*BACKUP_PASSWORD\s*=') { $envText = $envText -replace '(?m)^\s*BACKUP_PASSWORD\s*=.*$', "BACKUP_PASSWORD=$bp" }
+  else { $envText = $envText.TrimEnd() + "`r`n# daily DB backups are encrypted with this and sent to the admins in Telegram`r`nBACKUP_PASSWORD=$bp`r`n" }
+  Write-Utf8 $envFile $envText
+  Write-Host "`n    BACKUP_PASSWORD:  $bp`n" -ForegroundColor Yellow
+  try { Set-Clipboard -Value $bp; Ok "(уже в буфере обмена)" } catch { }
+  Warn "Сохрани его в менеджере паролей. Бот каждый день присылает зашифрованный бэкап базы, и без этого пароля"
+  Warn "его не расшифровать. Пароль записан в .env, но если сервер умрёт, .env умрёт вместе с ним."
+  Read-Host "    Нажми Enter, когда сохранишь" | Out-Null
+}
+
 # ---------------------------------------------------------------- python
 Step "Python"
 function Find-Python {

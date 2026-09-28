@@ -277,6 +277,10 @@ def screen_help() -> tuple[str, object]:
                 panel(f"{e('percent')} <b>Скидки</b>",
                       "<code>/disc @ник 4.1</code> — персональная скидка партнёру",
                       "<code>/disc @ник reset</code> — вернуть общую скидку"),
+                panel(f"{e('admin')} <b>Сервис</b>",
+                      "<code>/report</code> — отчёт за сегодня (каждое утро приходит сам)",
+                      "<code>/backup</code> — бэкап базы прямо сейчас",
+                      "<code>/bans</code> — забаненные IP · <code>/emoji</code> — пак эмодзи"),
                 "<i>Вместо @ника можно Telegram ID. Клиенту приходит уведомление об изменении баланса.</i>")
     return text, kb(back("a:home"))
 
@@ -535,6 +539,38 @@ async def cmd_bans(message: Message):
         await show(message, *await screen_bans(), edit=False)
 
 
+@router.message(Command("report"))
+async def cmd_report(message: Message):
+    """/report — the morning report on demand: today so far (Moscow time)."""
+    if not is_admin(message.from_user.id):
+        return
+    from datetime import datetime
+
+    from .report import MSK, report_text
+
+    now = utcnow()
+    day = (now + MSK).date()
+    since = datetime(day.year, day.month, day.day) - MSK
+    await show(message, await report_text(since, now, f"сегодня до {now + MSK:%H:%M}"), None, edit=False)
+
+
+@router.message(Command("backup"))
+async def cmd_backup(message: Message):
+    """/backup — make, check and send a database backup right now."""
+    if not is_admin(message.from_user.id):
+        return
+    from .backup import backup_now
+
+    await message.answer(f"{e('wait')} Делаю бэкап и проверяю базу…")
+    info = await backup_now()
+    if info.get("error"):
+        return await message.answer(f"{e('warn')} {esc(info['error'])}")
+    if not info["sent"]:
+        await message.answer(f"{e('ok' if info['ok'] else 'alarm')} Бэкап сделан на диске сервера "
+                             f"({'база цела' if info['ok'] else 'есть проблема — смотри алерт'}), "
+                             "но в Telegram не отправлен: нет BACKUP_PASSWORD в .env.")
+
+
 @router.message(Command("ban"))
 async def cmd_ban(message: Message, command: CommandObject):
     """/ban <ip> [часы] — block an IP by hand (default: the automatic ban length)."""
@@ -626,12 +662,22 @@ async def load_pack(bot: Bot) -> None:
              f"also used by base emoji for: {', '.join(got)}" if got else "all used keys come from tg_emoji.json")
 
 
+async def _telegram_heartbeat(make_request, bot, method):
+    """Every answered Bot API call (long polling returns every few seconds) proves the link to Telegram is alive."""
+    from . import health
+
+    result = await make_request(bot, method)
+    health.beat("telegram")
+    return result
+
+
 async def run_bot() -> None:
     global bot_username, _dp
     if not settings.bot_token:
         log.warning("BOT_TOKEN is not set — Telegram login and notifications are disabled")
         return
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot.session.middleware(_telegram_heartbeat)
     me = await bot.get_me()
     bot_username = me.username
     notify.set_bot(bot)

@@ -684,9 +684,12 @@ async def watch_supplier_balance() -> None:
 async def run_processor() -> None:
     from .webhooks import deliver_due
 
+    from . import health
+
     await recover_after_restart()
     tick = 0
     while True:
+        health.beat("orders")
         await process_once()
         try:
             await deliver_due()

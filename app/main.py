@@ -17,8 +17,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import bot as bot_mod
 from . import fail2ban as f2b
+from . import health
 from .api import router
 from .backup import run_backups
+from .report import run_reports
 from .partner_api import ApiError, api_error_response
 from .partner_api import router as partner_router
 from .config import settings
@@ -70,6 +72,7 @@ def asset_version() -> str:
 async def _settle_only() -> None:
     """Monitor disabled (local dev): still settle simulated transfers."""
     while True:
+        health.beat("settle")
         await monitor_mod.settle({})
         await asyncio.sleep(2)
 
@@ -89,7 +92,9 @@ async def lifespan(app: FastAPI):
     tasks = [asyncio.create_task(supervised("prices", price_feed.run)),
              asyncio.create_task(supervised("orders", run_processor)),
              asyncio.create_task(supervised("backup", run_backups, restart_delay=300)),
-             asyncio.create_task(supervised("fail2ban", f2b.run))]
+             asyncio.create_task(supervised("fail2ban", f2b.run)),
+             asyncio.create_task(supervised("report", run_reports, restart_delay=300)),
+             asyncio.create_task(supervised("watchdog", health.watchdog))]
     if settings.monitor_enabled:
         tasks.append(asyncio.create_task(supervised("monitor", monitor_mod.monitor.run)))
     else:
@@ -142,10 +147,13 @@ async def index():
     return HTMLResponse(_index_cache[v], headers={"Cache-Control": "no-cache"})
 
 
-@app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 async def healthz():
-    return {"ok": True, "chains": monitor_mod.monitor.status() if monitor_mod.monitor else {},
-            "nervixy_error": nervixy.last_error}
+    """For uptime monitors: 200 {"ok": true} when everything that moves money is alive, 503 with the list if not."""
+    bad = await health.problems()
+    return JSONResponse({"ok": not bad, "problems": [health.NAMES.get(b, b) for b in bad],
+                         "chains": monitor_mod.monitor.status() if monitor_mod.monitor else {},
+                         "nervixy_error": nervixy.last_error}, status_code=503 if bad else 200)
 
 
 @app.exception_handler(RequestValidationError)

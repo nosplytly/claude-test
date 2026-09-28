@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     f2b_ban_min: int = 60  # first ban; a repeat within a week lasts 24x longer (max 7 days)
     f2b_whitelist: str = ""  # your own IPs/subnets, comma separated: never banned (also skipped by the RDP guard)
 
+    # --- backups: daily, checked, encrypted with this password and sent to the admins in Telegram ---
+    backup_password: str = ""
+    # --- morning report to the admins (hour, Moscow time; -1 = off) ---
+    report_hour_msk: int = 9
+
     # --- database connection pool (SQLite: one writer at a time; readers in parallel) ---
     db_pool_size: int = 10
     db_max_overflow: int = 20
