@@ -61,20 +61,21 @@ def qr_payload(inv: Invoice) -> str:
     m = METHODS[inv.method]
     addr = display_address(m, inv.address)
     amt = plain(inv.amount)
+    memo = f"&text={quote(inv.comment)}" if inv.comment else ""
     if m.code == "btc":
         return f"bitcoin:{addr}?amount={amt}"
-    if m.code == "ltc":
+    elif m.code == "ltc":
         return f"litecoin:{addr}?amount={amt}"
-    if m.code == "ton":
-        return f"ton://transfer/{addr}?amount={inv.units}" + (f"&text={quote(inv.comment)}" if inv.comment else "")
-    if m.code == "usdt_ton":
-        return (f"ton://transfer/{addr}?jetton={m.token}&amount={inv.units}"
-                + (f"&text={quote(inv.comment)}" if inv.comment else ""))
-    if m.code == "sol":
+    elif m.code == "ton":
+        return f"ton://transfer/{addr}?amount={inv.units}{memo}"
+    elif m.code == "usdt_ton":
+        return f"ton://transfer/{addr}?jetton={m.token}&amount={inv.units}{memo}"
+    elif m.code == "sol":
         return f"solana:{addr}?amount={amt}"
-    if m.code == "usdt_sol":
+    elif m.code == "usdt_sol":
         return f"solana:{addr}?amount={amt}&spl-token={m.token}"
-    return addr
+    else:
+        return addr  # EVM and Tron wallets scan the bare address
 
 
 def method_view(m) -> dict:
