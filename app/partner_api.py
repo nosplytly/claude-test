@@ -5,12 +5,10 @@ All responses: {"ok": true, ...} or {"ok": false, "error": "..."}.
 """
 from __future__ import annotations
 
-import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
@@ -19,15 +17,16 @@ from .config import settings
 from .db import session_scope
 from .deposits import create_deposit, deposit_view
 from .models import ApiKey, Invoice, LedgerEntry, Order, User
-from .money import D, plain, to_micro, usd_str
+from .money import plain, to_micro, usd_str
 from .nervixy import CURRENCIES, NervixyError, NervixyTransportError, nervixy
 from .orders import InsufficientBalance, OrderError, create_order, discount_for, limits, public_order
 from .payments.methods import enabled_methods
 from .ratelimit import hit
+from .schemas import (DepositId, ExternalIdPath, Limit, Offset, OrderId, PartnerDepositIn, PartnerLoginIn,
+                      PartnerOrderIn, PartnerQuoteIn)
 from .utils import iso, sha256, utcnow
 
 router = APIRouter(prefix="/api/v1")
-EXT_ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
 
 
 class ApiError(Exception):
@@ -61,16 +60,6 @@ async def api_user(request: Request) -> User:
         return u
 
 
-def _dec(x, name: str) -> Decimal:
-    try:
-        v = D(x)
-    except (InvalidOperation, ValueError, TypeError) as e:
-        raise ApiError(400, f"Некорректное поле {name}") from e
-    if not v.is_finite() or v <= 0:
-        raise ApiError(400, f"Некорректное поле {name}")
-    return v
-
-
 # ------------------------------------------------------------------ account & reference data
 
 @router.get("/me")
@@ -98,14 +87,10 @@ async def methods(u: User = Depends(api_user)):
             "deposit_min_usd": plain(settings.min_deposit_usd), "deposit_max_usd": plain(settings.max_deposit_usd)}
 
 
-class LoginIn(BaseModel):
-    steam_login: str = Field(min_length=1, max_length=64)
-
-
 @router.post("/steam/check")
-async def steam_check(body: LoginIn, u: User = Depends(api_user)):
+async def steam_check(body: PartnerLoginIn, u: User = Depends(api_user)):
     try:
-        valid, _ = await nervixy.check_login(body.steam_login.strip())
+        valid, _ = await nervixy.check_login(body.steam_login)
     except NervixyError as e:
         if e.status == 400:
             return {"ok": True, "steam_login": body.steam_login, "valid": False}
@@ -115,17 +100,9 @@ async def steam_check(body: LoginIn, u: User = Depends(api_user)):
     return {"ok": True, "steam_login": body.steam_login, "valid": valid}
 
 
-class QuoteIn(BaseModel):
-    amount: str | float | int
-    currency: str = "RUB"
-
-
 @router.post("/quote")
-async def quote(body: QuoteIn, u: User = Depends(api_user)):
-    amount = _dec(body.amount, "amount").quantize(Decimal("0.01"))
-    cur = body.currency.upper()
-    if cur not in CURRENCIES:
-        raise ApiError(400, "currency: RUB, KZT, UAH или USD")
+async def quote(body: PartnerQuoteIn, u: User = Depends(api_user)):
+    amount, cur = body.amount.quantize(Decimal("0.01")), body.currency
     try:
         r = await nervixy.rates()
         lo, hi = await limits(cur)
@@ -140,28 +117,18 @@ async def quote(body: QuoteIn, u: User = Depends(api_user)):
 
 # ------------------------------------------------------------------ orders
 
-class OrderIn(BaseModel):
-    steam_login: str = Field(min_length=1, max_length=64)
-    amount: str | float | int
-    currency: str = "RUB"
-    external_id: str | None = Field(default=None, max_length=64)
-
-
 @router.post("/orders")
-async def create(body: OrderIn, u: User = Depends(api_user)):
+async def create(body: PartnerOrderIn, u: User = Depends(api_user)):
     hit(f"apiord:{u.id}", 60, 60)
-    ext = (body.external_id or "").strip() or None
-    if ext and not EXT_ID_RE.match(ext):
-        raise ApiError(400, "external_id: до 64 символов A-Z a-z 0-9 _ . : -")
+    ext = body.external_id
     if ext:
         async with session_scope() as s:
             dup = (await s.execute(select(Order).where(Order.user_id == u.id, Order.external_id == ext))).scalar_one_or_none()
             if dup:
                 return {"ok": True, "duplicate": True, "order": public_order(dup)}
-    amount = _dec(body.amount, "amount")
     try:
         async with session_scope() as s:  # `u` is detached: create_order touches `s` only after supplier calls
-            o = await create_order(s, u, steam_login=body.steam_login, amount=amount, currency=body.currency,
+            o = await create_order(s, u, steam_login=body.steam_login, amount=body.amount, currency=body.currency,
                                    method_code=None, source="api", external_id=ext, balance_only=True)
             view = public_order(o)
     except InsufficientBalance as e:
@@ -188,18 +155,17 @@ async def _find_order(u: User, **where) -> Order:
 
 
 @router.get("/orders/{order_id}")
-async def get_order(order_id: str, u: User = Depends(api_user)):
+async def get_order(order_id: OrderId, u: User = Depends(api_user)):
     return {"ok": True, "order": public_order(await _find_order(u, public_id=order_id))}
 
 
 @router.get("/orders/external/{external_id}")
-async def get_order_ext(external_id: str, u: User = Depends(api_user)):
+async def get_order_ext(external_id: ExternalIdPath, u: User = Depends(api_user)):
     return {"ok": True, "order": public_order(await _find_order(u, external_id=external_id))}
 
 
 @router.get("/orders")
-async def list_orders(limit: int = 50, offset: int = 0, u: User = Depends(api_user)):
-    limit, offset = max(1, min(limit, 100)), max(0, offset)
+async def list_orders(limit: Limit = 50, offset: Offset = 0, u: User = Depends(api_user)):
     async with session_scope() as s:
         total = (await s.execute(select(func.count()).select_from(Order).where(Order.user_id == u.id))).scalar_one()
         rows = (await s.execute(select(Order).where(Order.user_id == u.id).order_by(Order.id.desc())
@@ -209,11 +175,6 @@ async def list_orders(limit: int = 50, offset: int = 0, u: User = Depends(api_us
 
 # ------------------------------------------------------------------ balance
 
-class DepositIn(BaseModel):
-    amount_usd: str | float | int
-    method: str = Field(max_length=24)
-
-
 def _public_deposit(v: dict) -> dict:
     v = dict(v)
     for k in ("invoice_id", "stage", "qr"):
@@ -222,12 +183,12 @@ def _public_deposit(v: dict) -> dict:
 
 
 @router.post("/deposits")
-async def new_deposit(body: DepositIn, u: User = Depends(api_user)):
+async def new_deposit(body: PartnerDepositIn, u: User = Depends(api_user)):
     hit(f"apidep:{u.id}", 20, 600)
     try:
         async with session_scope() as s:
             user = await s.get(User, u.id)
-            inv = await create_deposit(s, user, amount_usd=_dec(body.amount_usd, "amount_usd"), method_code=body.method)
+            inv = await create_deposit(s, user, amount_usd=body.amount_usd, method_code=body.method)
             await s.flush()
             view = await deposit_view(s, inv)
     except OrderError as e:
@@ -236,7 +197,7 @@ async def new_deposit(body: DepositIn, u: User = Depends(api_user)):
 
 
 @router.get("/deposits/{deposit_id}")
-async def get_deposit(deposit_id: str, u: User = Depends(api_user)):
+async def get_deposit(deposit_id: DepositId, u: User = Depends(api_user)):
     async with session_scope() as s:
         inv = (await s.execute(select(Invoice).where(Invoice.public_id == deposit_id, Invoice.user_id == u.id))).scalar_one_or_none()
         if not inv:
@@ -245,8 +206,7 @@ async def get_deposit(deposit_id: str, u: User = Depends(api_user)):
 
 
 @router.get("/balance/history")
-async def balance_history(limit: int = 50, offset: int = 0, u: User = Depends(api_user)):
-    limit, offset = max(1, min(limit, 100)), max(0, offset)
+async def balance_history(limit: Limit = 50, offset: Offset = 0, u: User = Depends(api_user)):
     async with session_scope() as s:
         total = (await s.execute(select(func.count()).select_from(LedgerEntry).where(LedgerEntry.user_id == u.id))).scalar_one()
         rows = (await s.execute(select(LedgerEntry, Order.public_id).outerjoin(Order, LedgerEntry.order_id == Order.id)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -22,6 +22,7 @@ from .api import router
 from .backup import run_backups
 from .report import run_reports
 from .partner_api import ApiError, api_error_response
+from .schemas import site_message
 from .partner_api import router as partner_router
 from .config import settings
 from .db import engine, init_db
@@ -158,14 +159,20 @@ async def healthz():
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request, exc: RequestValidationError):
-    if request.url.path.startswith("/api/v1"):
-        errors = exc.errors()
-        if any(e.get("type") == "json_invalid" for e in errors):
-            return JSONResponse({"ok": False, "error": "Тело запроса — некорректный JSON"}, status_code=400)
-        fields = sorted({".".join(str(x) for x in e.get("loc", [])[1:]) for e in errors})
-        return JSONResponse({"ok": False, "error": f"Некорректные или отсутствующие поля: {', '.join(fields) or 'body'}"},
-                            status_code=400)
-    return JSONResponse({"detail": "Проверьте введённые данные"}, status_code=422)
+    """Everything the schemas (app/schemas.py) turned down. Nothing of the request reaches a handler."""
+    path, errors = request.url.path, exc.errors()
+    partner = path.startswith("/api/v1")
+    if path.startswith("/auth/"):  # a damaged one-time login link: just the home page, as for an expired one
+        return RedirectResponse("/", status_code=303)
+    if errors and all(e.get("loc", ("",))[0] == "path" for e in errors):  # /orders/<not an id>: there's no such thing
+        return JSONResponse({"ok": False, "error": "Не найдено"} if partner else {"detail": "Не найдено"}, status_code=404)
+    if not partner:
+        return JSONResponse({"detail": site_message(errors)}, status_code=422)
+    if any(e.get("type") == "json_invalid" for e in errors):
+        return JSONResponse({"ok": False, "error": "Тело запроса — некорректный JSON"}, status_code=400)
+    fields = {".".join(str(x) for x in e.get("loc", [])[1:]) or "body": e.get("msg", "") for e in errors}
+    return JSONResponse({"ok": False, "error": f"Некорректные или отсутствующие поля: {', '.join(sorted(fields))}",
+                         "fields": fields}, status_code=400)
 
 
 # telegram.org: the Mini App SDK script; web.telegram.org may show the site in an iframe (the Mini App in Telegram

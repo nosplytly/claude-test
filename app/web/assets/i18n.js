@@ -342,6 +342,10 @@ const EN = {
   'Доступ с вашего IP временно ограничен из-за подозрительной активности. Попробуйте позже.':
     'Access from your IP is temporarily restricted due to suspicious activity. Please try again later.',
   'Проверьте введённые данные': 'Check the data you entered',
+  'Не найдено': 'Not found',
+  'Не больше 20 IP-адресов': 'No more than 20 IP addresses',
+  'Слишком длинный список IP': 'The IP list is too long',
+  'сумма — число, а не true/false': 'the amount must be a number, not true/false',
   'Нужен адрес вида https://…': 'The address must look like https://…',
   'Слишком длинный адрес': 'The address is too long',
   'Домен не найден': 'Domain not found',
@@ -385,6 +389,7 @@ const PATTERNS = [
     (_, a) => `Right now we can take orders of up to ${a}. Lower the amount or try again later`],
   [/Оплата в (\S+) временно недоступна, выберите другую монету/, (_, c) => `Payments in ${c} are temporarily unavailable, choose another coin`],
   [/^Некорректный IP: (.+)$/, (_, x) => `Invalid IP: ${x}`],
+  [/^Лишнее поле: (.+)$/, (_, x) => `Unexpected field: ${x}`],
   [/^Webhook: (.+)$/, (_, x) => `Webhook: ${tr(x)}`],
   [/^Некорректные или отсутствующие поля: (.+)$/, (_, x) => `Invalid or missing fields: ${x}`],
   [/Возврат по заказу (\S+)/, (_, id) => `Refund for order ${id}`],

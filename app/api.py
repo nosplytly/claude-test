@@ -4,16 +4,15 @@ import asyncio
 import hashlib
 import hmac
 import io
-import json
 import logging
+import re
 from decimal import Decimal
-from typing import Literal
 from urllib.parse import quote
 
 import segno
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +37,8 @@ from .webhooks import BadWebhookUrl, check_url
 from .payments.methods import METHODS, enabled_methods
 from .prices import price_feed
 from .ratelimit import hit
+from .schemas import (ApiSettingsIn, ClaimIn, DepositId, DepositWebIn, DevLoginIn, InvoiceNo, LangIn, LoginCheckIn,
+                      LoginToken, NervixyEvent, OrderId, OrderIn, PromoIn, TelegramUser, WebAppIn)
 from .utils import iso, sha256, utcnow
 
 log = logging.getLogger("sh.api")
@@ -162,17 +163,10 @@ async def api_rates():
             "effective": {m.code: str(effective_price(m) or "") for m in enabled_methods()}}
 
 
-class LoginCheckIn(BaseModel):
-    login: str = Field(min_length=1, max_length=64)
-
-
 @router.post("/api/steam/check", dependencies=[Depends(csrf)])
 async def api_check_login(body: LoginCheckIn, request: Request):
     hit(f"chk:{client_ip(request)}", 20, 60)
-    login = body.login.strip()
-    import re
-    if not re.fullmatch(r"[A-Za-z0-9_.\-]{3,64}", login):
-        return {"valid": False, "message": "Логин: 3–64 символа — латиница, цифры, _ - ."}
+    login = body.login
     try:
         valid, msg = await nervixy.check_login(login)
     except NervixyError as e:
@@ -221,7 +215,7 @@ async def api_auth_poll(request: Request, response: Response, s: AsyncSession = 
 
 
 @router.get("/auth/tg")
-async def auth_from_bot_link(t: str, k: str, request: Request, s: AsyncSession = Depends(get_db)):
+async def auth_from_bot_link(t: LoginToken, k: LoginToken, request: Request, s: AsyncSession = Depends(get_db)):
     """One-time link from the bot's "back to site" button."""
     resp = RedirectResponse("/", status_code=303)
     req = await s.get(LoginRequest, t)
@@ -254,25 +248,19 @@ async def api_logout(request: Request, response: Response, s: AsyncSession = Dep
     return {"ok": True}
 
 
-class DevLoginIn(BaseModel):
-    tg_id: int = 1000001
-    name: str = "dev"
-
-
-class WebAppIn(BaseModel):
-    init_data: str = Field(min_length=10, max_length=4096)
-
-
 @router.post("/api/auth/webapp", dependencies=[Depends(csrf)])
 async def api_auth_webapp(body: WebAppIn, request: Request, response: Response):
     """Opened as a Telegram Mini App: log in from Telegram's signed launch data — no code to tap."""
     hit(f"webapp:{client_ip(request)}", 30, 600)
-    tg = verify_webapp(body.init_data, settings.bot_token)
+    raw_user = verify_webapp(body.init_data, settings.bot_token)
+    try:  # signed by Telegram, and still typed before use: an id that isn't a number must not become a 500
+        tg = TelegramUser.model_validate(raw_user) if raw_user else None
+    except ValidationError:
+        tg = None
     if not tg:
         raise HTTPException(401, "Не удалось подтвердить вход через Telegram — откройте приложение из бота заново")
     async with session_scope() as s:
-        user = await upsert_tg_user(s, int(tg["id"]), tg.get("username"), tg.get("first_name"), tg.get("last_name"),
-                                      tg.get("language_code"))
+        user = await upsert_tg_user(s, tg.id, tg.username, tg.first_name, tg.last_name, tg.language_code)
         if user.is_banned:
             raise HTTPException(403, "Аккаунт заблокирован")
         raw = await create_session(s, user, client_ip(request), request.headers.get("user-agent", ""))
@@ -295,10 +283,6 @@ async def api_dev_login(body: DevLoginIn, request: Request, response: Response, 
 @router.get("/api/me")
 async def api_me(user: User | None = Depends(current_user)):
     return {"user": user_view(user)}
-
-
-class PromoIn(BaseModel):
-    code: str = Field(min_length=1, max_length=32)
 
 
 @router.post("/api/promo/check", dependencies=[Depends(csrf)])
@@ -340,10 +324,6 @@ async def api_avatar(user: User = Depends(require_user)):
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
-class LangIn(BaseModel):
-    lang: Literal["ru", "en"]
-
-
 @router.post("/api/me/lang", dependencies=[Depends(csrf)])
 async def api_me_lang(body: LangIn, user: User = Depends(require_user)):
     """The RU/EN switch on the site: the bot talks to this customer in the same language from now on."""
@@ -364,21 +344,13 @@ async def api_waitlist(user: User = Depends(require_user)):
 
 # ------------------------------------------------------------------ orders
 
-class OrderIn(BaseModel):
-    steam_login: str = Field(min_length=1, max_length=64)
-    amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
-    currency: str = Field(min_length=3, max_length=3)
-    method: str | None = Field(default=None, max_length=24)
-    promo: str | None = Field(default=None, max_length=32)
-
-
 @router.post("/api/orders", dependencies=[Depends(csrf)])
 async def api_create_order(body: OrderIn, request: Request, user: User = Depends(require_user)):
     hit(f"ord:{user.id}", 8, 60)
     try:
         async with session_scope() as s:  # `user` is detached: create_order touches `s` only after supplier calls
             o = await create_order(s, user, steam_login=body.steam_login, amount=body.amount, currency=body.currency,
-                                   method_code=body.method, promo_code=body.promo or None)
+                                   method_code=body.method, promo_code=body.promo)
             oid = o.id
     except OrderError as e:
         raise HTTPException(400, str(e)) from e
@@ -400,7 +372,7 @@ async def _own_order(s: AsyncSession, user: User, pid: str) -> Order:
 
 
 @router.get("/api/orders/{pid}")
-async def api_order(pid: str, user: User = Depends(require_user), s: AsyncSession = Depends(get_db)):
+async def api_order(pid: OrderId, user: User = Depends(require_user), s: AsyncSession = Depends(get_db)):
     o = await _own_order(s, user, pid)
     view = await order_view(s, o)
     view["balance"] = usd_str((await s.get(User, user.id)).balance_micro)
@@ -408,7 +380,7 @@ async def api_order(pid: str, user: User = Depends(require_user), s: AsyncSessio
 
 
 @router.post("/api/orders/{pid}/cancel", dependencies=[Depends(csrf)])
-async def api_cancel(pid: str, user: User = Depends(require_user)):
+async def api_cancel(pid: OrderId, user: User = Depends(require_user)):
     async with session_scope() as s:
         o = await _own_order(s, user, pid)
         if o.status != "awaiting_payment":
@@ -426,19 +398,15 @@ async def api_cancel(pid: str, user: User = Depends(require_user)):
         return await order_view(s, o)
 
 
-class ClaimIn(BaseModel):
-    txid: str = Field(min_length=20, max_length=128)
+def _norm_txid(txid: str) -> str:
+    """EVM and Tron hashes are hex: one case, so the same transaction can't be claimed twice by changing letters."""
+    return txid.lower() if re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", txid) else txid
 
 
 @router.post("/api/orders/{pid}/claim", dependencies=[Depends(csrf)])
-async def api_claim(pid: str, body: ClaimIn, user: User = Depends(require_user)):
+async def api_claim(pid: OrderId, body: ClaimIn, user: User = Depends(require_user)):
     hit(f"claim:{user.id}", 5, 600)
-    txid = body.txid.strip()
-    import re
-    if not re.fullmatch(r"[A-Za-z0-9+/=_\-]{20,128}", txid):
-        raise HTTPException(400, "Это не похоже на хэш транзакции")
-    if re.fullmatch(r"0x[0-9a-fA-F]{64}", txid) or re.fullmatch(r"[0-9a-fA-F]{64}", txid):
-        txid = txid.lower()
+    txid = _norm_txid(body.txid)
     async with session_scope() as s:
         o = await _own_order(s, user, pid)
         dup = (await s.execute(select(Claim).where(Claim.txid == txid))).scalars().first()
@@ -450,14 +418,9 @@ async def api_claim(pid: str, body: ClaimIn, user: User = Depends(require_user))
 
 
 @router.post("/api/deposits/{pid}/claim", dependencies=[Depends(csrf)])
-async def api_deposit_claim(pid: str, body: ClaimIn, user: User = Depends(require_user)):
+async def api_deposit_claim(pid: DepositId, body: ClaimIn, user: User = Depends(require_user)):
     hit(f"claim:{user.id}", 5, 600)
-    txid = body.txid.strip()
-    import re
-    if not re.fullmatch(r"[A-Za-z0-9+/=_\-]{20,128}", txid):
-        raise HTTPException(400, "Это не похоже на хэш транзакции")
-    if re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", txid):
-        txid = txid.lower()
+    txid = _norm_txid(body.txid)
     async with session_scope() as s:
         inv = (await s.execute(select(Invoice).where(Invoice.public_id == pid, Invoice.user_id == user.id))).scalar_one_or_none()
         if not inv:
@@ -470,7 +433,7 @@ async def api_deposit_claim(pid: str, body: ClaimIn, user: User = Depends(requir
 
 
 @router.get("/api/invoices/{iid}/qr.svg")
-async def api_qr(iid: int, user: User = Depends(require_user), s: AsyncSession = Depends(get_db)):
+async def api_qr(iid: InvoiceNo, user: User = Depends(require_user), s: AsyncSession = Depends(get_db)):
     inv = await s.get(Invoice, iid)
     if not inv or inv.user_id != user.id:
         raise HTTPException(404)
@@ -481,11 +444,6 @@ async def api_qr(iid: int, user: User = Depends(require_user), s: AsyncSession =
 
 
 # ------------------------------------------------------------------ balance top-ups (cabinet)
-
-class DepositWebIn(BaseModel):
-    amount_usd: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-    method: str = Field(max_length=24)
-
 
 @router.post("/api/deposits", dependencies=[Depends(csrf)])
 async def api_create_deposit(body: DepositWebIn, user: User = Depends(require_user)):
@@ -502,7 +460,7 @@ async def api_create_deposit(body: DepositWebIn, user: User = Depends(require_us
 
 
 @router.get("/api/deposits/{pid}")
-async def api_deposit(pid: str, user: User = Depends(require_user), s: AsyncSession = Depends(get_db)):
+async def api_deposit(pid: DepositId, user: User = Depends(require_user), s: AsyncSession = Depends(get_db)):
     inv = (await s.execute(select(Invoice).where(Invoice.public_id == pid, Invoice.user_id == user.id))).scalar_one_or_none()
     if not inv:
         raise HTTPException(404, "Пополнение не найдено")
@@ -567,21 +525,9 @@ async def api_revoke_key(user: User = Depends(require_user)):
     return {"ok": True}
 
 
-class ApiSettingsIn(BaseModel):
-    allowed_ips: str = Field(default="", max_length=500)
-    webhook_url: str = Field(default="", max_length=500)
-
-
 @router.post("/api/account/settings", dependencies=[Depends(csrf)])
 async def api_settings(body: ApiSettingsIn, user: User = Depends(require_user)):
-    import ipaddress
-    ips = [x.strip() for x in body.allowed_ips.replace(";", ",").replace(" ", ",").split(",") if x.strip()]
-    for ip in ips:
-        try:
-            ipaddress.ip_address(ip)
-        except ValueError as e:
-            raise HTTPException(400, f"Некорректный IP: {ip}") from e
-    url = body.webhook_url.strip()
+    url = body.webhook_url
     if url:
         try:
             url = await check_url(url)
@@ -592,7 +538,7 @@ async def api_settings(body: ApiSettingsIn, user: User = Depends(require_user)):
         u = await s.get(User, user.id)
         k = await _active_key(s, user.id)
         if k:
-            k.allowed_ips = ",".join(ips) or None
+            k.allowed_ips = body.allowed_ips or None
         u.webhook_url = url or None
         if url and not u.webhook_secret:
             new_secret = u.webhook_secret = "whsec_" + token(24)
@@ -632,14 +578,13 @@ async def nervixy_webhook(request: Request):
     if not hmac.compare_digest(calc, sig.lower()):
         raise HTTPException(403, "bad signature")
     try:
-        data = json.loads(body)
-    except ValueError as e:
+        ev = NervixyEvent.model_validate_json(body)
+    except ValidationError as e:
         raise HTTPException(400) from e
-    nid = str(data.get("order_id") or "")
-    event = str(data.get("event") or "")
+    nid, event = ev.order_id or "", ev.event or ""
     if event == "webhook.test" or not nid:
         return {"ok": True}
-    status = str(data.get("status") or (event.split(".", 1)[1] if event.startswith("order.") else "")).lower()
+    status = (ev.status or (event.split(".", 1)[1] if event.startswith("order.") else "")).lower()
     async with session_scope() as s:
         o = (await s.execute(select(Order).where(Order.nervixy_order_id == nid))).scalar_one_or_none()
         oid = o.id if o else None
@@ -657,7 +602,7 @@ async def nervixy_webhook(request: Request):
 # ------------------------------------------------------------------ dev helpers
 
 @router.post("/api/dev/pay/{pid}", dependencies=[Depends(csrf)])
-async def api_dev_pay(pid: str, user: User = Depends(require_user)):
+async def api_dev_pay(pid: OrderId, user: User = Depends(require_user)):
     """Dev/mock only: pretend the exact invoice amount arrived on-chain."""
     if not (settings.is_dev and settings.nervixy_mock):
         raise HTTPException(404)

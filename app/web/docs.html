@@ -90,7 +90,8 @@
   <div class="table-scroll" tabindex="0" aria-label="Таблица API"><table>
     <tr><th>Код</th><th>Значение</th></tr>
     <tr><td>200</td><td>Успешно</td></tr>
-    <tr><td>400</td><td>Неверные параметры (текст в <code>error</code>)</td></tr>
+    <tr><td>400</td><td>Неверные параметры: текст в <code>error</code>, по каждому полю — в <code>fields</code>.
+      Лишние поля не игнорируются, а отклоняются; суммы — строкой или числом, не больше 2 знаков после точки</td></tr>
     <tr><td>401</td><td>Нет ключа или ключ неверный</td></tr>
     <tr><td>402</td><td>Недостаточно средств на балансе — в ответе <code>balance_usd</code> и <code>required_usd</code></td></tr>
     <tr><td>403</td><td>IP не в белом списке ключа или аккаунт заблокирован</td></tr>

@@ -115,7 +115,12 @@ for (const f of serverFiles) {
     pyCount += 1;
   }
 }
-const f2b = readFileSync(join(ROOT, 'app', 'fail2ban.py'), 'utf8').match(/"(Доступ с вашего IP[^"]*)"/)[1];
+// input checks (app/schemas.py): every Russian line there can reach the page as an error
+const schemaSrc = readFileSync(join(ROOT, 'app', 'schemas.py'), 'utf8').replace(/"""[\s\S]*?"""/g, '').replace(/#.*$/gm, '');
+const schemaTexts = [...schemaSrc.matchAll(/f?"([^"\n]*[А-Яа-яЁё][^"\n]*)"/g)].map((x) => x[1].replace(/\{[^}]*\}/g, 'X'));
+schemaTexts.forEach((t) => expect('schemas.py', t));
+check(schemaTexts.length >= 12, `проверка ввода: ${schemaTexts.length} сообщений из schemas.py`);
+expect('main.py', 'Не найдено');const f2b = readFileSync(join(ROOT, 'app', 'fail2ban.py'), 'utf8').match(/"(Доступ с вашего IP[^"]*)"/)[1];
 expect('fail2ban.py', f2b);
 check(pyCount > 45, `сервер: ${pyCount} сообщений об ошибках проверено`);
 
