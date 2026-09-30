@@ -32,6 +32,24 @@ def sha256(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 
+_background: set[asyncio.Task] = set()
+
+
+def background(coro, name: str = "background") -> asyncio.Task:
+    """Run a side job (an admin's Telegram card, an alert) without making the caller — a money worker — wait for it.
+    The task is kept referenced until done, and its error is logged instead of vanishing."""
+    task = asyncio.create_task(coro, name=name)
+    _background.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            log.error("%s failed", name, exc_info=t.exception())
+
+    task.add_done_callback(_done)
+    return task
+
+
 async def supervised(name: str, coro_factory, *, restart_delay: float = 5.0):
     """Run a long-lived coroutine forever, restarting it if it crashes."""
     while True:

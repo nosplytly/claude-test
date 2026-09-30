@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from aiogram.types import InlineKeyboardMarkup
@@ -56,29 +57,58 @@ def _emoji_problem(err: Exception) -> bool:
     return any(w in s for w in ("emoji", "entit", "icon", "style", "document_invalid"))
 
 
-async def send(chat_id: int, text: str, buttons=None) -> int | None:
-    """Send a message; returns its message_id (so it can be edited later), None if it didn't go out."""
-    markup = _markup(buttons)
-    if _bot is None:
+@dataclass
+class Delivery:
+    """How a send went: message_id when it went out; else the error, whether trying again can help at all
+    (a user who blocked the bot won't unblock it for a retry), and Telegram's own "wait N seconds" if it said so."""
+    message_id: int | None = None
+    error: str | None = None
+    permanent: bool = False
+    retry_after: float | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+PERMANENT = ("blocked", "deactivated", "chat not found", "user not found", "kicked", "have no rights", "user is deleted")
+
+
+async def deliver(chat_id: int, text: str, markup: InlineKeyboardMarkup | None = None) -> Delivery:
+    """One Telegram message, with the plain-emoji fallback; never raises."""
+    if _bot is None:  # no bot configured (local dev, tests): the log is the delivery
         log.info("[tg -> %s] %s", chat_id, tgui.strip_custom(text).replace("\n", " | "))
-        return None
+        return Delivery()
     try:
-        return (await _bot.send_message(chat_id, text, reply_markup=markup, disable_web_page_preview=True)).message_id
-    except Exception as e:  # noqa: BLE001 - blocked bot, bad chat, network...
+        msg = await _bot.send_message(chat_id, text, reply_markup=markup, disable_web_page_preview=True)
+        return Delivery(message_id=msg.message_id)
+    except Exception as e:  # noqa: BLE001 - blocked bot, bad chat, network, flood control...
+        err = e
         if _emoji_problem(e):
             tgui.disable_custom()
             try:
-                return (await _bot.send_message(chat_id, tgui.strip_custom(text), reply_markup=tgui.plain_markup(markup),
-                                                disable_web_page_preview=True)).message_id
+                msg = await _bot.send_message(chat_id, tgui.strip_custom(text), reply_markup=tgui.plain_markup(markup),
+                                              disable_web_page_preview=True)
+                return Delivery(message_id=msg.message_id)
             except Exception as e2:  # noqa: BLE001
-                e = e2
-        log.warning("telegram send to %s failed: %s", chat_id, e)
-        if "blocked" in str(e).lower() or "deactivated" in str(e).lower():
-            async with session_scope() as s:
-                u = (await s.execute(select(User).where(User.tg_id == chat_id))).scalar_one_or_none()
-                if u:
-                    u.bot_blocked = True
-        return None
+                err = e2
+    low = str(err).lower()
+    if "blocked" in low or "deactivated" in low:
+        async with session_scope() as s:
+            u = (await s.execute(select(User).where(User.tg_id == chat_id))).scalar_one_or_none()
+            if u:
+                u.bot_blocked = True
+    return Delivery(error=f"{type(err).__name__}: {err}"[:300], permanent=any(w in low for w in PERMANENT),
+                    retry_after=getattr(err, "retry_after", None))
+
+
+async def send(chat_id: int, text: str, buttons=None) -> int | None:
+    """Send a message now; returns its message_id (so it can be edited later), None if it didn't go out.
+    For news about money (payments, orders) use app.outbox instead: queued in the same transaction, sent with retries."""
+    d = await deliver(chat_id, text, _markup(buttons))
+    if not d.ok:
+        log.warning("telegram send to %s failed: %s", chat_id, d.error)
+    return d.message_id
 
 
 async def send_document(chat_id: int, data: bytes, filename: str, caption: str = "") -> int | None:

@@ -64,8 +64,8 @@ async def main():
     check(r.status_code == 503 and body["ok"] is False and "обработка заказов" in body["problems"]
           and "зачисление платежей" in body["problems"],
           f"циклы молчат → 503 и что именно стоит: {body['problems']}")
-    health.beat("orders")
-    health.beat("settle")
+    for name in health._watched():  # orders, settle, webhooks (+ telegram, notify with a bot)
+        health.beat(name)
     r = await c.get("/healthz")
     check(r.status_code == 200 and r.json()["problems"] == [], "циклы отметились → снова 200")
     r = await c.head("/healthz")

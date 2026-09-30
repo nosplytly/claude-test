@@ -120,6 +120,15 @@ async def press(uid, data, *, photo=False):
     return session.calls[before:]
 
 
+async def side_jobs():
+    """Money workers leave Telegram to others: the customer's news goes through the outbox, the admin's card is
+    posted/edited in the background. Let both finish, as the running service would a moment later."""
+    from app import outbox, utils
+    while utils._background:
+        await asyncio.gather(*list(utils._background), return_exceptions=True)
+    await outbox.flush()
+
+
 def visible(calls):
     """Everything a person reads in these calls: texts, captions, pop-ups, button labels."""
     out = []
@@ -143,7 +152,8 @@ def links(calls):
     return [x for x in out if x]
 
 
-def to_chat(chat_id, since):
+async def to_chat(chat_id, since):
+    await side_jobs()
     return [c for c in session.calls[since:] if getattr(c, "chat_id", None) == chat_id]
 
 
@@ -242,24 +252,24 @@ async def main():
     mark = len(session.calls)
     o = await new_order(en.id, "usdt_trc20")
     await pay("usdt_trc20", int((await invoice_of(o.id)).units))
-    english(to_chat(EN_ID, mark), "«оплата получена, пополняем Steam»")
+    english(await to_chat(EN_ID, mark), "«оплата получена, пополняем Steam»")
     mark = len(session.calls)
     check((await drive(o.id)).status == "delivered", "заказ выполнен")
-    txt = english(to_chat(EN_ID, mark), "«готово, Steam пополнен»")
+    txt = english(await to_chat(EN_ID, mark), "«готово, Steam пополнен»")
     check("topped up with" in txt and "Enjoy" in txt, "…текст осмысленный: " + txt[:90])
-    check(CYR.search(visible(to_chat(ADMIN, mark)) or "Р"), "админу про тот же заказ — по-русски")
+    check(CYR.search(visible(await to_chat(ADMIN, mark)) or "Р"), "админу про тот же заказ — по-русски")
 
     mark = len(session.calls)
     r = await new_order(en.id, "usdt_trc20", login="rejectme")
     await pay("usdt_trc20", int((await invoice_of(r.id)).units))
     check((await drive(r.id)).status == "rejected", "поставщик отклонил заказ")
-    english(to_chat(EN_ID, mark), "«поставщик отклонил, деньги на балансе»")
+    english(await to_chat(EN_ID, mark), "«поставщик отклонил, деньги на балансе»")
 
     mark = len(session.calls)
     p = await new_order(en.id, "usdt_trc20", amount="5000")  # more than the balance: an invoice is needed
     pi = await invoice_of(p.id)
     await pay("usdt_trc20", int(Decimal(pi.units) * Decimal("0.97")))
-    english(to_chat(EN_ID, mark), "«не хватает для заказа, доплатите»")
+    english(await to_chat(EN_ID, mark), "«не хватает для заказа, доплатите»")
 
     mark = len(session.calls)
     lo = await new_order(en.id, "usdt_bep20", amount="8000")
@@ -269,21 +279,21 @@ async def main():
         x.expires_at, x.created_at = utcnow() - timedelta(hours=1), utcnow() - timedelta(hours=2)
     await O.expire_stale()
     await pay("usdt_bep20", int(li.units))
-    english(to_chat(EN_ID, mark), "«платёж пришёл после истечения счёта — на баланс»")
+    english(await to_chat(EN_ID, mark), "«платёж пришёл после истечения счёта — на баланс»")
 
     mark = len(session.calls)
     async with session_scope() as s:
         d = await create_deposit(s, await s.get(DbUser, en.id), amount_usd=Decimal("10"), method_code="usdt_trc20")
         units = int(d.units)
     await pay("usdt_trc20", units)
-    english(to_chat(EN_ID, mark), "«баланс пополнен»")
+    english(await to_chat(EN_ID, mark), "«баланс пополнен»")
 
     mark = len(session.calls)
     q = await new_order(en.id, None, amount="500")  # paid from the balance
     async with session_scope() as s:
         (await s.get(Order, q.id)).status = "queued"
     await O.admin_refund(q.id)
-    english(to_chat(EN_ID, mark), "«заказ отменён, деньги на балансе» (админ вернул)")
+    english(await to_chat(EN_ID, mark), "«заказ отменён, деньги на балансе» (админ вернул)")
 
     async with session_scope() as s:  # a second English customer with an empty balance: the claim needs an invoice
         en2 = DbUser(tg_id=EN_ID + 1, username="user778", first_name="Kate", tg_lang="en-GB")
@@ -297,7 +307,7 @@ async def main():
     async with session_scope() as s:
         cl = (await s.execute(select(Claim).where(Claim.txid == txid))).scalar_one()
     await M.approve_claim(cl.id, True)
-    english(to_chat(EN_ID + 1, mark), "«платёж по заявке подтверждён»")
+    english(await to_chat(EN_ID + 1, mark), "«платёж по заявке подтверждён»")
     mark = len(session.calls)
     co2 = await new_order(en2.id, "usdt_erc20")
     txid2 = await pay("usdt_erc20", int(Decimal((await invoice_of(co2.id)).units) * Decimal("0.4")))
@@ -307,7 +317,7 @@ async def main():
     async with session_scope() as s:
         cl2 = (await s.execute(select(Claim).where(Claim.txid == txid2))).scalar_one()
     await M.approve_claim(cl2.id, False)
-    english(to_chat(EN_ID + 1, mark), "«заявка отклонена»")
+    english(await to_chat(EN_ID + 1, mark), "«заявка отклонена»")
 
     print("4. экраны бота после покупок")
     english(await press(EN_ID, "m:bal", photo=True), "баланс и история (пополнение, заказ, возврат)")

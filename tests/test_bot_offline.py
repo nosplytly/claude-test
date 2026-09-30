@@ -78,6 +78,15 @@ dp.include_router(B.router)
 _uid = 0
 
 
+async def side_jobs():
+    """Money workers leave Telegram to others: the customer's news goes through the outbox, the admin's card is
+    posted/edited in the background. Let both finish, as the running service would a moment later."""
+    from app import outbox, utils
+    while utils._background:
+        await asyncio.gather(*list(utils._background), return_exceptions=True)
+    await outbox.flush()
+
+
 def tg_user(uid, username="ivan"):
     return User(id=uid, is_bot=False, first_name="Иван", username=username)
 
@@ -382,6 +391,7 @@ async def main():
     check("Пополняется у nervixy" in session.calls[-1].text, "админу пришла одна карточка заказа «Пополняется у nervixy…»")
     before = len(session.calls)
     await O.apply_status(oid, "delivered")
+    await side_jobs()
     new = session.calls[before:]
     to_admin = [c for c in new if getattr(c, "chat_id", None) == 999]
     check(len(to_admin) == 1 and isinstance(to_admin[0], EditMessageText) and "Выполнено" in to_admin[0].text

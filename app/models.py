@@ -265,6 +265,28 @@ class WebhookEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class OutboxMessage(Base):
+    """A Telegram message waiting to go out. It's written in the same transaction as what it tells about (a payment
+    credited, an order done), so a crash can't lose it, and it's sent by its own worker, so Telegram being slow or
+    rate-limiting never holds up money. Sent in order per chat, retried with a growing pause."""
+
+    __tablename__ = "outbox"
+    __table_args__ = (Index("ix_outbox_due", "status", "next_attempt_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)  # a customer (chat found at send)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger)  # or a chat directly (admins)
+    text: Mapped[str] = mapped_column(Text)
+    markup: Mapped[str | None] = mapped_column(Text)  # the inline keyboard as JSON
+    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending | sent | failed
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_error: Mapped[str | None] = mapped_column(String(300))
+    message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class KV(Base):
     __tablename__ = "kv"
 

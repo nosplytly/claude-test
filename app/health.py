@@ -20,7 +20,7 @@ STARTED = time.time()
 GRACE = 180  # right after a (re)start nothing has beaten yet
 MAX_SILENCE = 180
 NAMES = {"db": "база данных", "orders": "обработка заказов", "settle": "зачисление платежей",
-         "telegram": "связь бота с Telegram"}
+         "telegram": "связь бота с Telegram", "notify": "отправка уведомлений", "webhooks": "вебхуки партнёрам"}
 _beats: dict[str, float] = {}
 
 
@@ -29,7 +29,7 @@ def beat(name: str) -> None:
 
 
 def _watched() -> list[str]:
-    return ["orders", "settle"] + (["telegram"] if settings.bot_token else [])
+    return ["orders", "settle", "webhooks"] + (["telegram", "notify"] if settings.bot_token else [])
 
 
 async def problems() -> list[str]:

@@ -145,12 +145,12 @@ def check(cond, msg):
 SENT: list[tuple[int, str]] = []
 
 
-async def fake_send(chat_id, text, buttons=None):
+async def fake_deliver(chat_id, text, markup=None):
     SENT.append((chat_id, text))
-    return True
+    return notify.Delivery(message_id=len(SENT))
 
 
-notify.send = fake_send
+notify.deliver = fake_deliver  # direct sends and the outbox both end up here
 
 
 # ------------------------------------------------------------------ supplier on a bad day
@@ -699,6 +699,11 @@ async def main():
     check(not dups, f"{n_inv} счетов: ни одной повторяющейся суммы в одной сети" + (f" — дубли {dups[:5]}" if dups else ""))
 
     print("6. уведомления")
+    from app import outbox, utils
+    while utils._background:  # the admins' cards are posted in the background
+        await asyncio.gather(*list(utils._background), return_exceptions=True)
+    while await outbox.send_due():  # the customers' news waits in the outbox until its worker sends it
+        pass
     ready = Counter(t.split("Заказ ")[-1].split("<")[0] for c, t in SENT if "Готово!" in t)
     check(all(ready.get(o.public_id, 0) == 1 for o in delivered) and sum(ready.values()) == len(delivered),
           f"«Готово!» пришло по каждому выполненному заказу ровно один раз ({sum(ready.values())})")

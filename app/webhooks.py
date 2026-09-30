@@ -2,6 +2,8 @@
 
 Body: {"event": "...", "data": {...}, "created_at": "..."}; header X-SH-Signature = hex HMAC-SHA256(body, secret).
 Retries after 1, 5, 15, 60 minutes, then 3 and 6 hours.
+Delivered by their own worker (run): a partner whose server is slow delays only their own webhooks — never Steam
+top-ups, and never the other partners (up to PARALLEL partners at once, each partner's events one at a time).
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import ipaddress
 import json
 import logging
 import socket
+from collections import defaultdict
 from datetime import timedelta
 from urllib.parse import urlparse
 
@@ -19,12 +22,14 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import events
 from .db import session_scope
 from .models import User, WebhookEvent
 from .utils import iso, utcnow
 
 log = logging.getLogger("sh.webhooks")
 BACKOFF = [60, 300, 900, 3600, 3 * 3600, 6 * 3600]
+PARALLEL = 5
 _http = httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0), follow_redirects=False,
                           headers={"User-Agent": "SupplierHub-Webhooks/1.0", "Content-Type": "application/json"})
 
@@ -59,20 +64,47 @@ async def queue_webhook(s: AsyncSession, user_id: int, event: str, data: dict) -
         return
     body = json.dumps({"event": event, "data": data, "created_at": iso(utcnow())}, ensure_ascii=False)
     s.add(WebhookEvent(user_id=user_id, event=event, payload=body, status="pending", next_attempt_at=utcnow()))
+    events.kick_after_commit(s, events.WEBHOOKS)
 
 
 def sign(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-async def deliver_due() -> None:
+async def deliver_due() -> int:
+    """One pass over the due webhooks; returns how many were attempted."""
     now = utcnow()
     async with session_scope() as s:
-        rows = (await s.execute(select(WebhookEvent.id).where(WebhookEvent.status == "pending",
-                                                               WebhookEvent.next_attempt_at <= now)
-                                .order_by(WebhookEvent.id).limit(20))).scalars().all()
-    for eid in rows:
-        await _deliver(eid)
+        rows = (await s.execute(select(WebhookEvent.id, WebhookEvent.user_id).where(
+            WebhookEvent.status == "pending", WebhookEvent.next_attempt_at <= now)
+            .order_by(WebhookEvent.id).limit(100))).all()
+    by_user: dict[int, list[int]] = defaultdict(list)
+    for eid, uid in rows:
+        by_user[uid].append(eid)
+    sem = asyncio.Semaphore(PARALLEL)
+
+    async def partner(ids: list[int]) -> None:
+        async with sem:
+            for eid in ids:
+                try:
+                    await _deliver(eid)
+                except Exception:  # noqa: BLE001 - one broken event must not stop the others
+                    log.exception("webhook %s failed", eid)
+
+    await asyncio.gather(*(partner(ids) for ids in by_user.values()))
+    return len(rows)
+
+
+async def run() -> None:
+    from . import health
+
+    while True:
+        health.beat("webhooks")
+        try:
+            await deliver_due()
+        except Exception:
+            log.exception("webhook pass failed")
+        await events.wait(events.WEBHOOKS, 5)
 
 
 async def _deliver(eid: int) -> None:

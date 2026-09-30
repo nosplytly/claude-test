@@ -8,7 +8,6 @@ awaiting_payment --> expired | cancelled
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -19,6 +18,7 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import events, outbox
 from .config import settings
 from .db import session_scope
 from .ledger import change_balance
@@ -26,12 +26,12 @@ from .models import Invoice, Order, Transfer, User
 from .money import D, from_micro, plain, to_micro, usd_str
 from .nervixy import CURRENCIES, NervixyError, NervixyTransportError, nervixy
 from .notify import edit as notify_edit
-from .notify import esc, notify_admins, notify_user
+from .notify import esc, notify_admins
 from . import promos
 from .payments.invoices import PaymentUnavailable, create_invoice
 from .payments.methods import get_method
 from .tgui import DANGER, PRIMARY, btn, e, kb, panel
-from .utils import iso, public_id, utcnow
+from .utils import background, iso, public_id, utcnow
 from .webhooks import queue_webhook
 
 log = logging.getLogger("sh.orders")
@@ -191,7 +191,7 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
 
     cap = supplier_balance - await reserved_cost_micro(s)
     if cost_micro > cap:  # alert in the background: this transaction holds the DB write lock
-        asyncio.create_task(notify_admins(
+        background(notify_admins(
             f"{e('warn')} <b>Не хватает баланса nervixy</b>\n"
             + panel(f"Клиент пытается оформить заказ на ${usd_str(cost_micro)}, а свободно ${usd_str(max(cap, 0))}.",
                     "Сайт пока отказывает в таких заказах — пополни баланс поставщика."),
@@ -263,6 +263,7 @@ async def try_charge(s: AsyncSession, order: Order) -> bool:
         return False
     now = utcnow()
     order.charged_micro, order.status, order.paid_at, order.next_check_at = amount, "paid", now, now
+    events.kick_after_commit(s, events.ORDERS)  # to the supplier right away, not on the processor's next tick
     return True
 
 
@@ -352,8 +353,8 @@ async def submit(order_id: int) -> None:
             async with session_scope() as s:
                 o = await s.get(Order, order_id)
                 o.status, o.error, o.next_check_at = "uncertain", f"нет ответа: {err}", utcnow() + timedelta(seconds=45)
-            await notify_admins(f"{e('warn')} Заказ <code>{pid}</code>: nervixy не ответил ({esc(err)}).\n"
-                                f"{e('wait')} Сверяю по их истории заказов — повторно вслепую не отправляю.")
+            background(notify_admins(f"{e('warn')} Заказ <code>{pid}</code>: nervixy не ответил ({esc(err)}).\n"
+                                     f"{e('wait')} Сверяю по их истории заказов — повторно вслепую не отправляю."))
             return
         except NervixyError as err:
             await _on_submit_error(order_id, err)
@@ -368,7 +369,13 @@ async def submit(order_id: int) -> None:
         nervixy.note_spent(from_micro(o.nervixy_paid_micro or o.cost_micro))
         o.next_check_at = utcnow() + timedelta(seconds=next_check_delay(0))
         admin_text = new_order_card(o, await s.get(User, o.user_id), note)
-    await remember_card(order_id, await notify_admins(admin_text, admin_kb()))
+    background(post_card(order_id, admin_text), f"card {pid}")
+
+
+async def post_card(order_id: int, text: str) -> None:
+    """The admins' card for an accepted order (edited later as the order finishes). Sent in the background:
+    the processor goes on to the next order instead of waiting for Telegram."""
+    await remember_card(order_id, await notify_admins(text, admin_kb()))
 
 
 def admin_kb():
@@ -418,25 +425,24 @@ async def _on_submit_error(order_id: int, err: NervixyError) -> None:
         else:
             await refund(s, o, err.message)
             await queue_webhook(s, o.user_id, "order.rejected", public_order(o))
-            user_id, pid, login = o.user_id, o.public_id, o.steam_login
+            pid, login = o.public_id, o.steam_login
             amt, price = fmt_amount(o.amount, o.currency), usd_str(o.price_micro)
+            await outbox.to_admins(s, f"{e('fail')} Заказ <code>{pid}</code> отклонён nervixy: {esc(err.message)}\n"
+                                      f"{e('refund')} ${price} возвращены клиенту на баланс.")
+            await outbox.to_user(s, o.user_id, f"{e('fail')} <b>Не удалось пополнить Steam</b>\n"
+                                 + panel(f"Аккаунт <code>{esc(login)}</code> · {amt}", f"Причина: {esc(err.message)}")
+                                 + f"\n{e('refund')} <b>${price}</b> вернулись на баланс сайта — можно оформить заказ заново.",
+                                 kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
+                                    [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
     if requeue:
         if err.insufficient_funds:
-            await notify_admins(f"{e('queue')} <b>Nervixy: не хватает средств</b>\n"
+            background(notify_admins(f"{e('queue')} <b>Nervixy: не хватает средств</b>\n"
                                 + panel(f"Баланс ${err.data.get('balance')}, нужно ${err.data.get('required')}.",
                                         "Оплаченные заказы ждут в очереди и уйдут сами, как только пополнишь баланс."),
                                 kb([btn("Nervixy", cb="a:nx", style=PRIMARY, icon="bank"),
-                                    btn("Очередь", cb="a:work", icon="work")]), key="nx-funds", every=1800)
+                                    btn("Очередь", cb="a:work", icon="work")]), key="nx-funds", every=1800))
         elif first:
-            await notify_admins(f"{e('queue')} Заказ <code>{pid}</code> в очереди: {esc(err.message)}", key=f"q-{pid}")
-        return
-    await notify_admins(f"{e('fail')} Заказ <code>{pid}</code> отклонён nervixy: {esc(err.message)}\n"
-                        f"{e('refund')} ${price} возвращены клиенту на баланс.")
-    await notify_user(user_id, f"{e('fail')} <b>Не удалось пополнить Steam</b>\n"
-                               + panel(f"Аккаунт <code>{esc(login)}</code> · {amt}", f"Причина: {esc(err.message)}")
-                               + f"\n{e('refund')} <b>${price}</b> вернулись на баланс сайта — можно оформить заказ заново.",
-                      kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
-                         [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
+            background(notify_admins(f"{e('queue')} Заказ <code>{pid}</code> в очереди: {esc(err.message)}", key=f"q-{pid}"))
 
 
 def next_check_delay(age: float) -> int:
@@ -482,46 +488,50 @@ async def apply_status(order_id: int, st: str) -> None:
             await queue_webhook(s, o.user_id, "order.delivered", public_order(o))
             spent = (o.finished_at - (o.submitted_at or o.finished_at)).total_seconds()
             card = new_order_card(o, await s.get(User, o.user_id), state=f"✅ <b>Выполнено</b> за {took(spent)}")
-            notify = ("ok", o.user_id, o.public_id, o.steam_login, fmt_amount(o.amount, o.currency),
-                      usd_str(o.price_micro - (o.nervixy_paid_micro or o.cost_micro)), msgs, card)
+            amt = fmt_amount(o.amount, o.currency)
+            await outbox.to_user(s, o.user_id, f"{e('ok')} <b>Готово!</b>\n"
+                                 + panel(f"Steam <code>{esc(o.steam_login)}</code> пополнен на <b>{amt}</b>.")
+                                 + f"\nПриятных покупок! {e('gift')}\n<i>Заказ {o.public_id}</i>",
+                                 kb([btn("Пополнить ещё", url=site("/"), style=PRIMARY, icon="rocket")],
+                                    [btn("Мои заказы", cb="m:orders", icon="orders")]))
+            notify = ("ok", o.public_id, amt, usd_str(o.price_micro - (o.nervixy_paid_micro or o.cost_micro)), msgs, card)
         elif st == "rejected":
             await refund(s, o, "отклонено поставщиком")
             await queue_webhook(s, o.user_id, "order.rejected", public_order(o))
             card = new_order_card(o, await s.get(User, o.user_id),
                                   state=f"❌ <b>Отклонён поставщиком</b> · ↩️ ${usd_str(o.price_micro)} "
                                         "вернулись клиенту на баланс")
-            notify = ("rej", o.user_id, o.public_id, o.steam_login, fmt_amount(o.amount, o.currency), usd_str(o.price_micro),
-                      msgs, card)
+            price = usd_str(o.price_micro)
+            await outbox.to_user(s, o.user_id, f"{e('fail')} <b>Поставщик отклонил пополнение</b>\n"
+                                 + panel(f"Аккаунт <code>{esc(o.steam_login)}</code> · {fmt_amount(o.amount, o.currency)}")
+                                 + f"\n{e('refund')} <b>${price}</b> вернулись на баланс сайта — можно оформить заказ заново.",
+                                 kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
+                                    [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
+            notify = ("rej", o.public_id, price, msgs, card)
         else:
             age = (utcnow() - (o.submitted_at or utcnow())).total_seconds()
             o.next_check_at = utcnow() + timedelta(seconds=next_check_delay(age))
             if age > 1800 and not o.admin_alerted:
                 o.admin_alerted = True
-                notify = ("slow", o.user_id, o.public_id, o.nervixy_order_id)
+                notify = ("slow", o.public_id, o.nervixy_order_id)
     if not notify:
         return
+    background(_tell_admins(notify), f"admin card {notify[1]}")  # the customer's news is already in the outbox
+
+
+async def _tell_admins(notify: tuple) -> None:
     if notify[0] == "ok":
-        _, uid, pid, login, amt, margin, msgs, card = notify
-        await notify_user(uid, f"{e('ok')} <b>Готово!</b>\n"
-                               + panel(f"Steam <code>{esc(login)}</code> пополнен на <b>{amt}</b>.")
-                               + f"\nПриятных покупок! {e('gift')}\n<i>Заказ {pid}</i>",
-                          kb([btn("Пополнить ещё", url=site("/"), style=PRIMARY, icon="rocket")],
-                             [btn("Мои заказы", cb="m:orders", icon="orders")]))
+        _, pid, amt, margin, msgs, card = notify
         # the admin's "Новый заказ" card turns into "Выполнено" — no second message with the same numbers
         if not await update_card(msgs, card):
             await notify_admins(f"{e('ok')} <code>{pid}</code> выполнен · {amt} · маржа <b>+${margin}</b>")
     elif notify[0] == "rej":
-        _, uid, pid, login, amt, price, msgs, card = notify
-        await notify_user(uid, f"{e('fail')} <b>Поставщик отклонил пополнение</b>\n"
-                               + panel(f"Аккаунт <code>{esc(login)}</code> · {amt}")
-                               + f"\n{e('refund')} <b>${price}</b> вернулись на баланс сайта — можно оформить заказ заново.",
-                          kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
-                             [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
+        _, pid, price, msgs, card = notify
         await update_card(msgs, card)  # the card shows the outcome; a rejection also deserves a ping of its own
         await notify_admins(f"{e('fail')} <code>{pid}</code> отклонён поставщиком · {e('refund')} ${price} вернулись клиенту на баланс")
     else:
-        await notify_admins(f"{e('turtle')} Заказ <code>{notify[2]}</code> в обработке у nervixy больше 30 минут "
-                            f"(id <code>{esc(notify[3])}</code>). Проверь в их панели.")
+        await notify_admins(f"{e('turtle')} Заказ <code>{notify[1]}</code> в обработке у nervixy больше 30 минут "
+                            f"(id <code>{esc(notify[2])}</code>). Проверь в их панели.")
 
 
 async def reconcile(order_id: int) -> None:
@@ -560,14 +570,14 @@ async def reconcile(order_id: int) -> None:
             if alert:
                 o.admin_alerted = True
     if card:
-        await remember_card(order_id, await notify_admins(card, admin_kb()))
+        background(post_card(order_id, card), f"card {pid}")
     if alert:
-        await notify_admins(
+        background(notify_admins(
             f"{e('alarm')} <b>Заказ <code>{pid}</code> завис</b>\n"
             + panel("Nervixy не ответил на создание, и в их истории этого заказа нет уже 5+ минут.")
             + "\nПроверь панель nervixy и выбери действие:",
             kb([btn("Отправить повторно", cb=f"ad:retry:{order_id}", style=PRIMARY, icon="retry")],
-               [btn("Вернуть на баланс", cb=f"ad:refund:{order_id}", style=DANGER, icon="refund")]))
+               [btn("Вернуть на баланс", cb=f"ad:refund:{order_id}", style=DANGER, icon="refund")])))
 
 
 # ---------------------------------------------------------------- deposits & expiry
@@ -706,23 +716,18 @@ async def watch_supplier_balance() -> None:
 
 
 async def run_processor() -> None:
-    from .webhooks import deliver_due
-
     from . import health
 
     await recover_after_restart()
-    tick = 0
+    last_balance_check = 0.0
     while True:
         health.beat("orders")
         await process_once()
-        try:
-            await deliver_due()
-        except Exception:
-            log.exception("webhook delivery failed")
-        if tick % 20 == 0:  # ~once a minute; the account itself is re-read from nervixy at most every ~5 min
+        if time.time() - last_balance_check > 60:  # the account itself is re-read from nervixy at most every ~5 min
+            last_balance_check = time.time()
             await watch_supplier_balance()
-        tick += 1
-        await asyncio.sleep(3)
+        # a paid order wakes us at once (try_charge); otherwise look again in 3 s for status checks and retries
+        await events.wait(events.ORDERS, 3)
 
 
 async def admin_retry(order_id: int) -> str:
@@ -741,12 +746,11 @@ async def admin_refund(order_id: int) -> str:
             return "Заказ уже не в ожидании решения"
         await refund(s, o, "возврат администратором", status="rejected")
         await queue_webhook(s, o.user_id, "order.rejected", public_order(o))
-        uid, amt, login, price = o.user_id, fmt_amount(o.amount, o.currency), o.steam_login, usd_str(o.price_micro)
-    await notify_user(uid, f"{e('refund')} <b>Заказ отменён</b>\n"
-                           + panel(f"Пополнение Steam <code>{esc(login)}</code> ({amt}) не выполнено.",
-                                   f"<b>${price}</b> вернулись на баланс сайта."),
-                      kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
-                         [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
+        await outbox.to_user(s, o.user_id, f"{e('refund')} <b>Заказ отменён</b>\n"
+                             + panel(f"Пополнение Steam <code>{esc(o.steam_login)}</code> ({fmt_amount(o.amount, o.currency)}) не выполнено.",
+                                     f"<b>${usd_str(o.price_micro)}</b> вернулись на баланс сайта."),
+                             kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
+                                [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
     return "Возвращено на баланс клиента"
 
 

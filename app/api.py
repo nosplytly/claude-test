@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import avatars, i18n, waitlist
+from . import avatars, events, i18n, waitlist
 from . import bot as bot_mod
 from .auth import verify_webapp
 from .auth import (LOGIN_COOKIE, LOGIN_TTL, SESSION_COOKIE, SESSION_TTL, client_ip, create_session, current_user,
@@ -630,5 +630,6 @@ async def api_dev_pay(pid: OrderId, user: User = Depends(require_user)):
         async with session_scope() as s:
             t = (await s.execute(select(Transfer).where(Transfer.txid == inc.txid))).scalar_one()
             t.final, t.confirmations = True, m.confirmations
+            events.kick_after_commit(s, events.credit(m.chain))  # as the chain's poller does
     asyncio.create_task(confirm_later())
     return {"ok": True}

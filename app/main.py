@@ -17,7 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import bot as bot_mod
 from . import fail2ban as f2b
-from . import health
+from . import health, outbox, webhooks
 from .api import router
 from .backup import run_backups
 from .report import run_reports
@@ -95,7 +95,9 @@ async def lifespan(app: FastAPI):
              asyncio.create_task(supervised("backup", run_backups, restart_delay=300)),
              asyncio.create_task(supervised("fail2ban", f2b.run)),
              asyncio.create_task(supervised("report", run_reports, restart_delay=300)),
-             asyncio.create_task(supervised("watchdog", health.watchdog))]
+             asyncio.create_task(supervised("watchdog", health.watchdog)),
+             asyncio.create_task(supervised("outbox", outbox.run)),  # Telegram news about money, with retries
+             asyncio.create_task(supervised("webhooks", webhooks.run))]  # partners' webhooks, off the order path
     if settings.monitor_enabled:
         tasks.append(asyncio.create_task(supervised("monitor", monitor_mod.monitor.run)))
     else:

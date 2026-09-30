@@ -1,4 +1,10 @@
-"""Polls every chain, stores incoming transfers, matches them to invoices and credits balances."""
+"""Polls every chain, stores incoming transfers, matches them to invoices and credits balances.
+
+Every chain has two workers of its own: the poller (reads the chain, records transfers) and the credit worker
+(verifies final transfers and credits them — several at once, woken by the poller the moment one is ready).
+A slow explorer or a stuck chain holds up only itself. Crediting never waits for Telegram: the customer's message
+is queued in the same transaction as the money (app.outbox) and sent by its own worker.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -11,15 +17,16 @@ from decimal import Decimal
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import events, outbox
 from ..config import settings
 from ..db import session_scope
 from ..ledger import change_balance
 from ..models import Claim, Invoice, Order, Transfer, User
 from ..money import plain, to_micro, units_to_amount, usd_str
-from ..notify import esc, notify_admins, notify_user
+from ..notify import esc, notify_admins
 from ..prices import price_feed
 from ..tgui import DANGER, PRIMARY, SUCCESS, btn, e, kb, panel, site
-from ..utils import supervised, utcnow
+from ..utils import background, supervised, utcnow
 from ..webhooks import queue_webhook
 from .chains.base import Incoming, Watcher
 from .chains.evm import EvmWatcher
@@ -43,6 +50,8 @@ TOLERANCE = Decimal("0.10")  # fuzzy match: received within ±10% of the expecte
 # seconds between polls: (while invoices are open, idle)
 INTERVALS = {"tron": (10, 120), "ton": (10, 120), "sol": (12, 180), "bsc": (8, 120), "eth": (15, 120),
              "btc": (30, 300), "ltc": (40, 600)}
+CREDIT_PARALLEL = 4  # transfers of one chain verified and credited at the same time (each one is claimed atomically)
+CREDIT_IDLE = 5.0  # a credit worker looks anyway this often, even if nothing woke it
 
 
 def build_watchers() -> dict[str, Watcher]:
@@ -157,33 +166,59 @@ async def refresh_block_confirmations(chain: str, head: int) -> None:
             t.final = t.confirmations >= METHODS[t.method].confirmations
 
 
-async def settle(watchers: dict[str, Watcher]) -> None:
-    """Credit final matched transfers; alert about final unmatched ones; process claims."""
+async def credit_ready(watchers: dict[str, Watcher], methods: list[str] | None = None) -> int:
+    """Credit the final matched transfers (of these methods), CREDIT_PARALLEL at a time. Two workers reaching the same
+    transfer is harmless: credit_transfer claims it with an atomic UPDATE, and only one of them gets it."""
     async with session_scope() as s:
-        todo = (await s.execute(select(Transfer.id).where(Transfer.final.is_(True), Transfer.status == "matched"))).scalars().all()
+        q = select(Transfer.id).where(Transfer.final.is_(True), Transfer.status == "matched")
+        if methods is not None:
+            q = q.where(Transfer.method.in_(methods))
+        todo = (await s.execute(q.order_by(Transfer.id))).scalars().all()
+    if not todo:
+        return 0
+    sem = asyncio.Semaphore(CREDIT_PARALLEL)
+
+    async def one(tid: int) -> None:
+        async with sem:
+            try:
+                await credit_transfer(tid, watchers)
+            except Exception:
+                log.exception("credit transfer %s failed", tid)
+
+    await asyncio.gather(*(one(tid) for tid in todo))
+    return len(todo)
+
+
+async def alert_unmatched() -> None:
+    """Final transfers that matched no invoice: the admins hear about each once (queued with the flag itself)."""
+    async with session_scope() as s:
         lonely = (await s.execute(select(Transfer).where(Transfer.final.is_(True), Transfer.status == "unmatched",
                                                           Transfer.admin_alerted.is_(False)))).scalars().all()
         recent = utcnow() - ALERT_MAX_AGE
-        lonely_info = []
         for t in lonely:
             t.admin_alerted = True
             # old history of the address (first poll of a reused wallet) is recorded silently
-            if (t.block_time or t.created_at) >= recent:
-                lonely_info.append((t.method, t.amount, t.txid, t.from_address))
-    for tid in todo:
-        try:
-            await credit_transfer(tid, watchers)
-        except Exception:
-            log.exception("credit transfer %s failed", tid)
-    for method, amount, txid, frm in lonely_info:
-        m = METHODS[method]
-        await notify_admins(
-            f"{e('question')} <b>Неопознанный платёж</b>\n"
-            + panel(f"{e('coin')} <b>{plain(amount)} {m.coin}</b> · {m.network_title}",
-                    f"{e('user')} от <code>{esc(frm or '?')}</code>")
-            + "\nНи к одному счёту не подошёл по сумме. Если клиент пришлёт хэш через сайт — придёт заявка с кнопками.",
-            kb([btn("Транзакция", url=m.tx_url(txid), icon="tx")]))
+            if (t.block_time or t.created_at) < recent:
+                continue
+            m = METHODS[t.method]
+            await outbox.to_admins(
+                s, f"{e('question')} <b>Неопознанный платёж</b>\n"
+                + panel(f"{e('coin')} <b>{plain(t.amount)} {m.coin}</b> · {m.network_title}",
+                        f"{e('user')} от <code>{esc(t.from_address or '?')}</code>")
+                + "\nНи к одному счёту не подошёл по сумме. Если клиент пришлёт хэш через сайт — придёт заявка с кнопками.",
+                kb([btn("Транзакция", url=m.tx_url(t.txid), icon="tx")]))
+
+
+async def housekeeping() -> None:
+    await alert_unmatched()
     await process_claims()
+
+
+async def settle(watchers: dict[str, Watcher]) -> None:
+    """Everything in one go: credit what's ready on every chain, alert, process claims (tests, local dev payments;
+    the running service does the same with a worker per chain)."""
+    await credit_ready(watchers)
+    await housekeeping()
 
 
 async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
@@ -205,7 +240,6 @@ async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
 
     from ..orders import after_deposit, fmt_amount  # local import: orders imports payments
 
-    messages: list[tuple] = []
     async with session_scope() as s:
         # claim the transfer first: of several passes crediting it at the same moment, exactly one gets rowcount 1
         claimed = await s.execute(update(Transfer).where(Transfer.id == tid, Transfer.status == "matched")
@@ -241,48 +275,37 @@ async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
                 "deposit_id": inv.public_id, "credited_usd": usd_str(value, 6), "amount": plain(t.amount),
                 "coin": m.coin, "network": m.network, "txid": t.txid, "balance_usd": usd_str(bal, 6)})
         paid = f"{plain(t.amount)} {m.coin} · {m.network_title if m.network == m.coin else m.network}"
+        uid = inv.user_id
         if res.get("paid_order"):
-            messages.append(("paid", inv.user_id, order.public_id, order.steam_login,
-                             fmt_amount(order.amount, order.currency), paid))
+            await outbox.to_user(s, uid, f"{e('card')} <b>Оплата получена</b> · {paid}\n"
+                                 + panel(f"{e('wait')} Пополняем Steam <code>{esc(order.steam_login)}</code> на "
+                                         f"<b>{fmt_amount(order.amount, order.currency)}</b>…")
+                                 + f"\nПришлю сообщение, как только всё будет готово.\n<i>Заказ {order.public_id}</i>",
+                                 kb([btn("Мои заказы", cb="m:orders", icon="orders")]))
         elif res.get("late"):
-            messages.append(("late", inv.user_id, paid, usd_str(value), usd_str(bal)))
+            await outbox.to_user(s, uid, f"{e('money')} <b>Платёж зачислен на баланс</b> · {paid}\n"
+                                 + panel(f"+<b>${usd_str(value)}</b> → баланс ${usd_str(bal)}")
+                                 + "\nОн пришёл после истечения счёта, поэтому заказ не выполнен автоматически. "
+                                 "Оформите заказ заново — он оплатится с баланса.",
+                                 kb([btn("Оформить заказ", url=site("/"), style=PRIMARY, icon="rocket")]))
         elif res.get("remainder_invoice") is not None:
-            ri = res["remainder_invoice"]
-            messages.append(("partial", inv.user_id, usd_str(value), usd_str(res.get("missing")), plain(ri.amount),
-                             m.coin, m.network, order.public_id if order else ""))
+            ri, pid = res["remainder_invoice"], order.public_id if order else ""
+            await outbox.to_user(s, uid, f"{e('warn')} <b>Не хватает для заказа {pid}</b>\n"
+                                 + panel(f"Получено ${usd_str(value)}, не хватает ${usd_str(res.get('missing'))}.")
+                                 + f"\nДоплатите <b>{plain(ri.amount)} {m.coin}</b> ({m.network}) — новый счёт уже на сайте.",
+                                 kb([btn("Открыть счёт", url=site(f"/#/order/{pid}"), style=PRIMARY, icon="card")]))
         elif order is None:
-            messages.append(("deposit", inv.user_id, paid, usd_str(value), usd_str(bal), payer.display_name, m.tx_url(t.txid)))
-    for msg in messages:
-        kind, uid = msg[0], msg[1]
-        if kind == "paid":
-            await notify_user(uid, f"{e('card')} <b>Оплата получена</b> · {msg[5]}\n"
-                                   + panel(f"{e('wait')} Пополняем Steam <code>{esc(msg[3])}</code> на <b>{msg[4]}</b>…")
-                                   + f"\nПришлю сообщение, как только всё будет готово.\n<i>Заказ {msg[2]}</i>",
-                              kb([btn("Мои заказы", cb="m:orders", icon="orders")]))
-        elif kind == "late":
-            await notify_user(uid, f"{e('money')} <b>Платёж зачислен на баланс</b> · {msg[2]}\n"
-                                   + panel(f"+<b>${msg[3]}</b> → баланс ${msg[4]}")
-                                   + "\nОн пришёл после истечения счёта, поэтому заказ не выполнен автоматически. "
-                                   "Оформите заказ заново — он оплатится с баланса.",
-                              kb([btn("Оформить заказ", url=site("/"), style=PRIMARY, icon="rocket")]))
-        elif kind == "partial":
-            await notify_user(uid, f"{e('warn')} <b>Не хватает для заказа {msg[7]}</b>\n"
-                                   + panel(f"Получено ${msg[2]}, не хватает ${msg[3]}.")
-                                   + f"\nДоплатите <b>{msg[4]} {msg[5]}</b> ({msg[6]}) — новый счёт уже на сайте.",
-                              kb([btn("Открыть счёт", url=site(f"/#/order/{msg[7]}"), style=PRIMARY, icon="card")]))
-        elif kind == "deposit":
-            await notify_user(uid, f"{e('money')} <b>Баланс пополнен</b>\n"
-                                   + panel(f"+<b>${msg[3]}</b> · {msg[2]}", f"На балансе: <b>${msg[4]}</b>"),
-                              kb([btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")],
-                                 [btn("Баланс", cb="m:bal", style=SUCCESS, icon="money")]))
-            await notify_admins(f"{e('money')} <b>Пополнение баланса</b> · +${msg[3]}\n"
-                                f"{e('user')} {esc(msg[5])} · {msg[2]}",
-                                kb([btn("Транзакция", url=msg[6], icon="tx")]))
+            await outbox.to_user(s, uid, f"{e('money')} <b>Баланс пополнен</b>\n"
+                                 + panel(f"+<b>${usd_str(value)}</b> · {paid}", f"На балансе: <b>${usd_str(bal)}</b>"),
+                                 kb([btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")],
+                                    [btn("Баланс", cb="m:bal", style=SUCCESS, icon="money")]))
+            await outbox.to_admins(s, f"{e('money')} <b>Пополнение баланса</b> · +${usd_str(value)}\n"
+                                      f"{e('user')} {esc(payer.display_name)} · {paid}",
+                                   kb([btn("Транзакция", url=m.tx_url(t.txid), icon="tx")]))
 
 
 async def process_claims() -> None:
     """User-submitted tx hashes: bind to a recorded unmatched transfer, then ask an admin to approve."""
-    alerts = []
     async with session_scope() as s:
         waiting = (await s.execute(select(Claim).where(Claim.status == "waiting"))).scalars().all()
         for c in waiting:
@@ -312,17 +335,16 @@ async def process_claims() -> None:
                 m = METHODS[t.method]
                 inv = (await s.execute(select(Invoice).where(Invoice.order_id == o.id).order_by(Invoice.id.desc()))
                        ).scalars().first() if o else None
-                alerts.append((c.id, m.tx_url(t.txid),
+                await outbox.to_admins(s,
                                f"{e('claim')} <b>Заявка #{c.id}</b> на зачисление платежа\n"
                                f"{e('user')} {esc(u.display_name)} (tg <code>{u.tg_id}</code>) говорит, что это его платёж:\n"
                                + panel(f"{e('coin')} <b>{plain(t.amount)} {m.coin}</b> · {m.network_title}",
                                        f"от <code>{esc(t.from_address or '?')}</code> · {tx_time:%d.%m %H:%M} UTC")
                                + (f"\n{e('orders')} Заказ <code>{o.public_id}</code>: счёт был на {plain(inv.amount)} "
-                                  f"{METHODS[inv.method].coin} ({METHODS[inv.method].network})" if o and inv else "")))
-    for cid, url, text in alerts:
-        await notify_admins(text, kb([btn("Зачислить", cb=f"cl:ok:{cid}", style=SUCCESS, icon="ok"),
-                                      btn("Отклонить", cb=f"cl:no:{cid}", style=DANGER, icon="cancel")],
-                                     [btn("Транзакция", url=url, icon="tx")]))
+                                  f"{METHODS[inv.method].coin} ({METHODS[inv.method].network})" if o and inv else ""),
+                               kb([btn("Зачислить", cb=f"cl:ok:{c.id}", style=SUCCESS, icon="ok"),
+                                   btn("Отклонить", cb=f"cl:no:{c.id}", style=DANGER, icon="cancel")],
+                                  [btn("Транзакция", url=m.tx_url(t.txid), icon="tx")]))
 
 
 async def approve_claim(claim_id: int, approve: bool) -> str:
@@ -342,8 +364,10 @@ async def approve_claim(claim_id: int, approve: bool) -> str:
             return "Заявка уже обработана"
         if not approve:
             c.status, c.resolved_at, c.note = "rejected", utcnow(), "отклонено администратором"
-            uid = c.user_id
-            result = ("no", uid)
+            await outbox.to_user(s, c.user_id, f"{e('fail')} <b>Заявка на зачисление отклонена</b>\n"
+                                 "Если это ошибка — напишите в поддержку, разберёмся.",
+                                 kb([btn("Поддержка", url=settings.support_url, icon="support")] if settings.support_url else []))
+            return "Отклонено"
         else:
             won = await s.execute(update(Transfer).where(Transfer.id == t.id, Transfer.status == "unmatched")
                                   .values(status="credited").execution_options(synchronize_session=False))
@@ -364,17 +388,12 @@ async def approve_claim(claim_id: int, approve: bool) -> str:
                         o.status = "awaiting_payment"  # still honour recent orders
                     from ..orders import try_charge
                     paid = await try_charge(s, o)
-            result = ("ok", c.user_id, usd_str(value), paid)
-    if result[0] == "no":
-        await notify_user(result[1], f"{e('fail')} <b>Заявка на зачисление отклонена</b>\n"
-                                     "Если это ошибка — напишите в поддержку, разберёмся.",
-                          kb([btn("Поддержка", url=settings.support_url, icon="support")] if settings.support_url else []))
-        return "Отклонено"
-    _, uid, usd, paid = result
-    await notify_user(uid, f"{e('ok')} <b>Платёж подтверждён</b>\n+<b>${usd}</b> на балансе."
-                           + (f"\n{e('wait')} Заказ оплачен, пополняем Steam…" if paid else ""),
-                      kb([btn("Мои заказы" if paid else "Пополнить Steam", **({"cb": "m:orders"} if paid else {"url": site("/")}),
-                              style=PRIMARY, icon="orders" if paid else "rocket")]))
+            usd = usd_str(value)
+            await outbox.to_user(s, c.user_id, f"{e('ok')} <b>Платёж подтверждён</b>\n+<b>${usd}</b> на балансе."
+                                 + (f"\n{e('wait')} Заказ оплачен, пополняем Steam…" if paid else ""),
+                                 kb([btn("Мои заказы" if paid else "Пополнить Steam",
+                                         **({"cb": "m:orders"} if paid else {"url": site("/")}),
+                                         style=PRIMARY, icon="orders" if paid else "rocket")]))
     return f"Зачислено ${usd}"
 
 
@@ -403,11 +422,13 @@ class Monitor:
             await ingest(items)
             if isinstance(w, EvmWatcher) and w._head:
                 await refresh_block_confirmations(chain, w._head)
+            events.kick(events.credit(chain))  # a transfer may have become final: credit it now
             self.last_ok[chain] = time.time()
             self.fail_since.pop(chain, None)
             self.last_error.pop(chain, None)
             for msg in getattr(w, "gap_warnings", [])[:]:
-                await notify_admins(f"{e('warn')} <b>Мониторинг {chain}</b>\n{esc(msg)}", key=f"gap-{chain}", every=6 * 3600)
+                background(notify_admins(f"{e('warn')} <b>Мониторинг {chain}</b>\n{esc(msg)}", key=f"gap-{chain}",
+                                         every=6 * 3600))
             if hasattr(w, "gap_warnings"):
                 w.gap_warnings.clear()
         except Exception as err:  # noqa: BLE001
@@ -415,10 +436,10 @@ class Monitor:
             first = self.fail_since.setdefault(chain, time.time())
             log.warning("poll %s failed: %s", chain, self.last_error[chain][:300])
             if time.time() - first > 600:
-                await notify_admins(f"{e('net')} <b>Мониторинг {chain} не работает</b> уже "
-                                    f"{int((time.time() - first) // 60)} мин\n"
-                                    f"Платежи в этой сети пока не распознаются.\n<i>{esc(self.last_error[chain][:300])}</i>",
-                                    key=f"chain-{chain}", every=3600)
+                background(notify_admins(f"{e('net')} <b>Мониторинг {chain} не работает</b> уже "
+                                         f"{int((time.time() - first) // 60)} мин\n"
+                                         f"Платежи в этой сети пока не распознаются.\n<i>{esc(self.last_error[chain][:300])}</i>",
+                                         key=f"chain-{chain}", every=3600))
 
     async def active_chains(self) -> set[str]:
         """Chains with open invoices / unconfirmed transfers (cached for 2 s, shared by all chain loops)."""
@@ -438,20 +459,31 @@ class Monitor:
                     break
                 await asyncio.sleep(min(2.0, max(0.2, target - time.time())))
 
-    async def _settle_loop(self) -> None:
+    async def _credit_loop(self, chain: str) -> None:
+        from .. import health
+
+        methods = [m.code for m in self.watchers[chain].methods]
+        while True:
+            health.beat("settle")
+            await credit_ready(self.watchers, methods)
+            await events.wait(events.credit(chain), CREDIT_IDLE)  # the poller wakes us when a transfer is final
+
+    async def _housekeeping_loop(self) -> None:
         from .. import health
 
         while True:
-            health.beat("settle")
-            await settle(self.watchers)
-            await asyncio.sleep(2)
+            health.beat("settle")  # also alive with no wallets configured (then there's no credit worker)
+            await housekeeping()
+            await asyncio.sleep(5)
 
     async def run(self) -> None:
         if not self.watchers:
             log.warning("no wallets configured — crypto payments are disabled")
         tasks = [asyncio.create_task(supervised(f"chain-{c}", lambda c=c: self._chain_loop(c)))
                  for c in self.watchers]
-        tasks.append(asyncio.create_task(self._settle_loop()))
+        tasks += [asyncio.create_task(supervised(f"credit-{c}", lambda c=c: self._credit_loop(c)))
+                  for c in self.watchers]
+        tasks.append(asyncio.create_task(supervised("claims", self._housekeeping_loop)))
         try:
             await asyncio.gather(*tasks)
         finally:
