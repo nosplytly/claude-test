@@ -39,7 +39,7 @@ from .prices import price_feed
 from .ratelimit import hit
 from .schemas import (ApiSettingsIn, ClaimIn, DepositId, DepositWebIn, DevLoginIn, InvoiceNo, LangIn, LoginCheckIn,
                       LoginToken, NervixyEvent, OrderId, OrderIn, PromoIn, TelegramUser, WebAppIn)
-from .utils import iso, sha256, utcnow
+from .utils import background, iso, sha256, utcnow
 
 log = logging.getLogger("sh.api")
 router = APIRouter()
@@ -593,9 +593,9 @@ async def nervixy_webhook(request: Request):
             # signed with our secret, so a final status in it is authoritative: apply it right away instead of asking
             # the API again (that call can hit nervixy's rate limit and delay the customer's "Готово!" by minutes).
             # apply_status only moves a "processing" order once, so replays and repeats are harmless.
-            asyncio.create_task(apply_status(oid, status))
+            background(apply_status(oid, status), f"webhook status {oid}")
         else:
-            asyncio.create_task(check_status(oid))  # anything else is a hint: re-read the status from the API
+            background(check_status(oid), f"webhook check {oid}")  # anything else is a hint: re-read the status from the API
     return {"ok": True}
 
 
@@ -631,5 +631,5 @@ async def api_dev_pay(pid: OrderId, user: User = Depends(require_user)):
             t = (await s.execute(select(Transfer).where(Transfer.txid == inc.txid))).scalar_one()
             t.final, t.confirmations = True, m.confirmations
             events.kick_after_commit(s, events.credit(m.chain))  # as the chain's poller does
-    asyncio.create_task(confirm_later())
+    background(confirm_later(), "dev payment")
     return {"ok": True}
