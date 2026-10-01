@@ -105,7 +105,7 @@ $Venv = Join-Path $Root ".venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 if (-not (Test-Path $VenvPy)) { & $Python -m venv $Venv }
 Quiet { & $VenvPy -m pip install --quiet --upgrade pip }
-& $VenvPy -m pip install --quiet -r (Join-Path $Root "requirements.txt")
+& $VenvPy -m pip install --quiet -r (Join-Path $Root "requirements.txt") -c (Join-Path $Root "constraints.txt")
 if ($LASTEXITCODE -ne 0) { Fail "pip install не прошёл" }
 Ok "зависимости установлены"
 

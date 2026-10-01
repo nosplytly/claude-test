@@ -1,10 +1,11 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-sqlalchemy[asyncio]>=2.0
-aiosqlite>=0.20
-httpx>=0.27
-pydantic-settings>=2.3
-aiogram>=3.13
-segno>=1.6
-base58>=2.1
-cryptography>=43
+# exact versions the app is tested with (python tools in .venv are not part of the app)
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+sqlalchemy[asyncio]==2.1.1
+aiosqlite==0.22.1
+httpx==0.28.1
+pydantic-settings==2.15.0
+aiogram==3.31.0
+segno==1.6.6
+base58==2.1.1
+cryptography==50.0.1

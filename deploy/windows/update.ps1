@@ -10,7 +10,7 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $VenvPy = Join-Path $Root ".venv\Scripts\python.exe"
 
 Write-Host "==> зависимости" -ForegroundColor Cyan
-& $VenvPy -m pip install --quiet -r (Join-Path $Root "requirements.txt")
+& $VenvPy -m pip install --quiet -r (Join-Path $Root "requirements.txt") -c (Join-Path $Root "constraints.txt")
 
 Write-Host "==> перезапуск" -ForegroundColor Cyan
 Restart-Service supplierhub-app
