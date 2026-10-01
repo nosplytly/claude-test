@@ -885,3 +885,7 @@ body.intro-on .stage, body.intro-on .foot { visibility: hidden; }
   .soon-cta { height: 42px; font-size: 13.5px; }
 }
 @media (prefers-reduced-motion: reduce) { .soon-tag i { animation: none; } }
+/* ============================================================ language */
+/* out of sight until i18n.js has put the page's language in; if scripts fail, it shows anyway after 2 s */
+html.i18n-pending body { opacity: 0; animation: i18n-reveal 0s 2s forwards; }
+@keyframes i18n-reveal { to { opacity: 1; } }

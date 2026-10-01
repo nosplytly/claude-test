@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API — SupplierHub</title>
+<meta name="description" content="SupplierHub API for partners: top up Steam and your balance with crypto.">
+<meta name="theme-color" content="#0B0B0C">
+<link rel="alternate" hreflang="ru" href="/api-docs?lang=ru">
+<link rel="icon" href="/assets/img/favicon.svg?v={{v}}" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/app.css?v={{v}}">
+<link rel="stylesheet" href="/assets/docs.css?v={{v}}">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="g-ring" viewBox="0 0 100 100"><circle cx="50" cy="50" r="20" fill="none" stroke="currentColor" stroke-width="13"/></symbol>
+  <symbol id="g-diamond" viewBox="0 0 100 100"><path d="M50 22 78 50 50 78 22 50z" fill="currentColor"/></symbol>
+  <symbol id="g-rect" viewBox="0 0 100 100"><rect x="23.5" y="32.5" width="53" height="35" rx="8" fill="currentColor"/></symbol>
+  <symbol id="g-plus" viewBox="0 0 100 100"><path d="M50 28v44M28 50h44" stroke="currentColor" stroke-width="14" stroke-linecap="round" fill="none"/></symbol>
+</defs></svg>
+<div class="bg" aria-hidden="true"><div class="bg-glow"></div><div class="bg-grid"></div></div>
+
+<header class="top">
+  <a class="lockup" href="/">
+    <div class="mark" aria-hidden="true">
+      <span class="tile"><svg><use href="#g-ring"/></svg></span><span class="tile"><svg><use href="#g-diamond"/></svg></span>
+      <span class="tile"><svg><use href="#g-rect"/></svg></span><span class="tile blue"><svg><use href="#g-plus"/></svg></span>
+    </div>
+    <div class="word"><b>SupplierHub</b><small>instant digital top-ups</small></div>
+  </a>
+  <nav class="top-actions"><a class="btn-ghost doc-lang" href="/api-docs?lang=ru" hreflang="ru" lang="ru" aria-label="Русская версия">RU</a><a class="btn-ghost" href="/">Back to the site</a></nav>
+</header>
+
+<main class="docs">
+  <h1>SupplierHub API</h1>
+  <p class="lead">Top up Steam for your customers automatically. You fund your balance with crypto, orders are paid from that balance, and a webhook tells you how each one went.</p>
+
+  <div class="grid3">
+    <div class="panel"><div class="n">1</div><b>Get a key</b><span>Sign in on the website with Telegram → profile menu → “API for partners” → “Create key”.</span></div>
+    <div class="panel"><div class="n">2</div><b>Fund your balance</b><span>On the website or with <code>POST /deposits</code> — USDT, BTC, ETH, TON and more.</span></div>
+    <div class="panel"><div class="n">3</div><b>Create orders</b><span><code>POST /orders</code> charges your balance and tops up Steam.</span></div>
+  </div>
+
+  <h2 id="basics">Basics</h2>
+  <p>Base URL: <code>{{base}}/api/v1</code>. Send your key in the <code>X-API-Key</code> header. Requests and responses are JSON (UTF-8).
+    A successful response contains <code>"ok": true</code>; an error has <code>"ok": false</code> and a message in <code>error</code>.
+    Messages follow your <code>Accept-Language</code> header: <code>en</code> gets English, anything else Russian.</p>
+<pre tabindex="0" aria-label="Code example"><code>curl {{base}}/api/v1/me -H "X-API-Key: SH-your_key" -H "Accept-Language: en"</code></pre>
+  <div class="table-scroll" tabindex="0" aria-label="API table"><table>
+    <tr><th>Code</th><th>Meaning</th></tr>
+    <tr><td>200</td><td>Success</td></tr>
+    <tr><td>400</td><td>Invalid parameters: the message is in <code>error</code>, details for each field in <code>fields</code>.
+      Unknown fields are rejected rather than ignored; amounts go as a string or a number with at most 2 decimal places</td></tr>
+    <tr><td>401</td><td>Missing or invalid key</td></tr>
+    <tr><td>402</td><td>Not enough balance — the response includes <code>balance_usd</code> and <code>required_usd</code></td></tr>
+    <tr><td>403</td><td>The IP isn't on the key's allowlist, or the account is blocked</td></tr>
+    <tr><td>404</td><td>Not found</td></tr>
+    <tr><td>429</td><td>Too many requests (the limit is 120 per minute per key)</td></tr>
+    <tr><td>503</td><td>Service temporarily unavailable — try again later</td></tr>
+  </table></div>
+  <p>Dollar amounts are strings with up to 6 decimal places (<code>"12.249635"</code>), so no precision is lost.</p>
+
+  <h2 id="account">Account and reference data</h2>
+  <h3><span class="m get">GET</span><span class="path">/me</span></h3>
+  <p>Your balance and discount.</p>
+<pre tabindex="0" aria-label="Code example"><code>{ "ok": true, "user_id": 42, "telegram_id": 123456789, "username": "partner",
+  "balance_usd": "250.000000", "discount": "3.75" }</code></pre>
+
+  <h3><span class="m get">GET</span><span class="path">/rates</span></h3>
+  <p>Exchange rates (units of each currency per 1 USD), your discount, and the order amount limits in each currency.</p>
+<pre tabindex="0" aria-label="Code example"><code>{ "ok": true, "base": "USD", "rates": { "RUB": "83.88992", "KZT": "441.03842", "UAH": "44.52718", "USD": "1" },
+  "discount": "3.75", "limits": { "RUB": { "min": "17", "max": "30000" }, "USD": { "min": "0.20", "max": "357.61" } } }</code></pre>
+
+  <h3><span class="m get">GET</span><span class="path">/methods</span></h3>
+  <p>The ways you can fund your balance (coin + network) and the deposit limits.</p>
+<pre tabindex="0" aria-label="Code example"><code>{ "ok": true, "deposit_min_usd": "0.2", "deposit_max_usd": "10000",
+  "methods": [ { "code": "usdt_trc20", "coin": "USDT", "network": "TRC20", "network_title": "TRON", "confirmations": 1 }, … ] }</code></pre>
+
+  <h3><span class="m post">POST</span><span class="path">/steam/check</span></h3>
+  <p>Checks whether a Steam account can be topped up. It takes the <b>login</b> the customer signs in with, not their profile nickname.</p>
+<pre tabindex="0" aria-label="Code example"><code>curl -X POST {{base}}/api/v1/steam/check -H "X-API-Key: SH-…" -H "Content-Type: application/json" \
+  -d '{"steam_login": "mylogin"}'
+
+{ "ok": true, "steam_login": "mylogin", "valid": true }</code></pre>
+
+  <h3><span class="m post">POST</span><span class="path">/quote</span></h3>
+  <p>How much a top-up of a given amount will take from your balance.</p>
+<pre tabindex="0" aria-label="Code example"><code>{"amount": 1000, "currency": "RUB"}
+
+{ "ok": true, "amount": "1000", "currency": "RUB", "nominal_usd": "11.920384", "price_usd": "11.473370",
+  "discount": "3.75", "min": "17", "max": "30000", "within_limits": true }</code></pre>
+
+  <h2 id="orders">Orders</h2>
+  <h3><span class="m post">POST</span><span class="path">/orders</span></h3>
+  <p>Creates a Steam top-up and charges its cost to your balance straight away.</p>
+  <div class="table-scroll" tabindex="0" aria-label="API table"><table>
+    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>steam_login</code></td><td>string</td><td>Steam login, 3–64 characters (Latin letters, digits, <code>_ - .</code>)</td></tr>
+    <tr><td><code>amount</code></td><td>number | string</td><td>The amount to add, in <code>currency</code></td></tr>
+    <tr><td><code>currency</code></td><td>string</td><td><code>RUB</code>, <code>KZT</code>, <code>UAH</code> or <code>USD</code> (the Steam account's currency)</td></tr>
+    <tr><td><code>external_id</code></td><td>string, optional</td><td>Your own order ID (up to 64 characters). Sending the same ID again won't create a second order: you get the first one back with <code>"duplicate": true</code>, so it's safe to retry after a timeout.</td></tr>
+  </table></div>
+<pre tabindex="0" aria-label="Code example"><code>curl -X POST {{base}}/api/v1/orders -H "X-API-Key: SH-…" -H "Content-Type: application/json" \
+  -d '{"steam_login": "mylogin", "amount": 1000, "currency": "RUB", "external_id": "order-1001"}'
+
+{ "ok": true, "duplicate": false,
+  "order": { "id": "SH7K2P9Q4M", "external_id": "order-1001", "status": "processing",
+             "steam_login": "mylogin", "amount": "1000", "currency": "RUB",
+             "price_usd": "11.473370", "charged_usd": "11.473370",
+             "created_at": "2026-09-27T12:00:00Z", "finished_at": null, "error": null } }</code></pre>
+  <div class="table-scroll" tabindex="0" aria-label="API table"><table>
+    <tr><th>Status</th><th>Meaning</th></tr>
+    <tr><td><code>processing</code></td><td>Paid from your balance; the top-up is under way</td></tr>
+    <tr><td><code>delivered</code></td><td>Steam has been topped up</td></tr>
+    <tr><td><code>rejected</code></td><td>The top-up failed and <code>charged_usd</code> went back to your balance; the reason is in <code>error</code></td></tr>
+  </table></div>
+
+  <h3><span class="m get">GET</span><span class="path">/orders/{id}</span></h3>
+  <p>An order by our ID (<code>SH…</code>). To look one up by your own ID, use <code>GET /orders/external/{external_id}</code>.</p>
+  <h3><span class="m get">GET</span><span class="path">/orders?limit=50&amp;offset=0</span></h3>
+  <p>Your order history, newest first. <code>limit</code> goes up to 100.</p>
+
+  <h2 id="balance">Balance</h2>
+  <h3><span class="m post">POST</span><span class="path">/deposits</span></h3>
+  <p>An invoice for funding your balance. Send <b>exactly</b> <code>amount</code> of the coin to <code>address</code> on the given network within 30 minutes —
+    the unique amount is how we recognise your payment. For TON, also put <code>comment</code> in the transfer's comment field.</p>
+<pre tabindex="0" aria-label="Code example"><code>{"amount_usd": 100, "method": "usdt_trc20"}
+
+{ "ok": true, "deposit": { "id": "DP4M9QX2KA", "status": "pending", "usd": "100.00", "received_usd": "0.00",
+  "method": "usdt_trc20", "coin": "USDT", "network": "TRC20", "network_title": "TRON",
+  "address": "TXYZ…", "amount": "100.0001", "comment": null,
+  "expires_at": "2026-09-27T12:30:00Z", "created_at": "2026-09-27T12:00:00Z", "paid_at": null, "payment": null } }</code></pre>
+  <p>Statuses: <code>pending</code> → <code>detected</code> (payment found, waiting for confirmations) → <code>paid</code>
+    (or <code>partial</code> if less arrived — whatever arrived is credited). A payment that comes in after <code>expires_at</code> is credited too.</p>
+  <h3><span class="m get">GET</span><span class="path">/deposits/{id}</span></h3>
+  <h3><span class="m get">GET</span><span class="path">/balance/history?limit=50&amp;offset=0</span></h3>
+  <p>Every balance movement: <code>deposit</code>, <code>order</code> (a charge), <code>refund</code>, <code>adjust</code>.</p>
+<pre tabindex="0" aria-label="Code example"><code>{ "ok": true, "total": 3, "items": [
+  { "id": 7, "kind": "order", "amount_usd": "-11.473370", "balance_usd": "88.526730", "order_id": "SH7K2P9Q4M",
+    "comment": "Steam mylogin: 1 000 ₽", "created_at": "2026-09-27T12:05:00Z" } ] }</code></pre>
+
+  <h2 id="webhooks">Webhooks</h2>
+  <p>Set an HTTPS URL in your account (the API tab). When you save it, you get a <code>whsec_…</code> secret. We then send a <code>POST</code> with JSON:</p>
+<pre tabindex="0" aria-label="Code example"><code>{ "event": "order.delivered",
+  "data": { "id": "SH7K2P9Q4M", "external_id": "order-1001", "status": "delivered", … },
+  "created_at": "2026-09-27T12:03:10Z" }</code></pre>
+  <div class="table-scroll" tabindex="0" aria-label="API table"><table>
+    <tr><th>Event</th><th>When</th></tr>
+    <tr><td><code>order.delivered</code></td><td>Steam has been topped up</td></tr>
+    <tr><td><code>order.rejected</code></td><td>The top-up failed and the money went back to your balance</td></tr>
+    <tr><td><code>deposit.credited</code></td><td>A payment was confirmed and credited (<code>credited_usd</code>, <code>balance_usd</code>, <code>txid</code>)</td></tr>
+    <tr><td><code>webhook.test</code></td><td>You pressed “Test webhook” in your account</td></tr>
+  </table></div>
+  <p>The <code>X-SH-Signature</code> header is the HMAC-SHA256 of the raw request body, keyed with your secret (hex). Reply with any 2xx code within 8 seconds;
+    otherwise we retry after 1, 5, 15 and 60 minutes, then after 3 and 6 hours. An event can arrive more than once, so handle them idempotently (by <code>data.id</code>).</p>
+<pre tabindex="0" aria-label="Code example"><code># Python
+import hmac, hashlib
+def verify(body: bytes, signature: str, secret: str) -> bool:
+    calc = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(calc, signature)
+
+// Node.js
+const crypto = require('crypto');
+const ok = crypto.timingSafeEqual(
+  Buffer.from(crypto.createHmac('sha256', secret).update(rawBody).digest('hex')),
+  Buffer.from(req.headers['x-sh-signature']));
+
+// PHP
+$ok = hash_equals(hash_hmac('sha256', file_get_contents('php://input'), $secret), $_SERVER['HTTP_X_SH_SIGNATURE'] ?? '');</code></pre>
+
+  <h2 id="security">Security</h2>
+  <ul>
+    <li>Keep the key on your server only. If it leaks, press “Reissue” in your account — the old key stops working at once.</li>
+    <li>Restrict the key to your server's IP addresses in your account.</li>
+    <li>Verify the signature of every webhook.</li>
+  </ul>
+</main>
+<footer class="foot"><span>© SupplierHub</span><a href="/">Top up Steam</a></footer>
+</body>
+</html>

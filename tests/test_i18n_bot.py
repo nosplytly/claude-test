@@ -409,6 +409,13 @@ async def main():
     leftover = [k for k, v in en_cat.items() if CYR.search(v) and k not in bilingual]
     check(not leftover, f"в английском каталоге нет русских слов{': ' + ', '.join(leftover) if leftover else ''}")
     check(i18n.t("no.such.key", "en") == "no.such.key", "нет ключа → виден сам ключ (и ошибка в логе), а не падение")
+    from app.orders import reason_text
+    check(reason_text("Аккаунт не найден", "ru") == "Аккаунт не найден"
+          and reason_text("Аккаунт не найден", "en") == "declined by the supplier",
+          "причина отказа от поставщика (по-русски): русскому клиенту — как есть, англоязычному — понятная фраза")
+    check(reason_text("Steam account is limited", "en") == "Steam account is limited"
+          and reason_text("reason.refunded_by_admin", "en") == i18n.t("reason.refunded_by_admin", "en") and reason_text(None, "en") is None,
+          "английский текст поставщика и наши причины (ключи) показываются как есть / переводятся")
 
     async def boom(*a, **k):
         raise RuntimeError("db down")

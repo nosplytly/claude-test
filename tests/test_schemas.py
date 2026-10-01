@@ -210,6 +210,24 @@ async def main():
                 assert r.status_code < 500, (path, j, r.status_code, r.text[:200])
         check(worst < 500, f"{len(targets) * len(junk)} мусорных запросов на {len(targets)} адресов — ни одного 500")
 
+        print("9. документация API на двух языках")
+        docs = lambda r: "en" if '<html lang="en">' in r.text else "ru" if '<html lang="ru">' in r.text else "?"  # noqa: E731
+        c.cookies.clear()
+        r = await c.get("/api-docs")
+        check(r.status_code == 200 and docs(r) == "ru" and "{{" not in r.text, "без подсказок — по-русски, шаблон заполнен")
+        r = await c.get("/api-docs", headers={"Accept-Language": "en-GB,en;q=0.9"})
+        check(docs(r) == "en" and r.headers["content-language"] == "en" and "https://sh.test/api/v1" in r.text,
+              "английский браузер → английская версия с адресом API")
+        r = await c.get("/api-docs", headers={"Cookie": "sh_lang=en", "Accept-Language": "ru"})
+        check(docs(r) == "en", "сайт показан по-английски (cookie) → документация тоже, хотя браузер русский")
+        r = await c.get("/api-docs?lang=ru", headers={"Cookie": "sh_lang=en"})
+        check(docs(r) == "ru" and "sh_lang=ru" in r.headers.get("set-cookie", ""), "переключатель RU на странице важнее и запоминается")
+        c.cookies.clear()  # the client keeps the cookie from the switch above, like a browser would
+        r = await c.get("/api-docs?lang=xx", headers={"Accept-Language": "en"})
+        check(r.status_code == 200 and docs(r) == "en" and "set-cookie" not in r.headers, "мусор в ?lang= игнорируется")
+        r = await c.get("/assets/docs.css")
+        check(r.status_code == 200 and ".docs" in r.text, "стили документации отдаются (/assets/docs.css)")
+
     print(f"\nALL GOOD: {OK} checks passed")
 
 

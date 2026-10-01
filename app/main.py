@@ -133,10 +133,19 @@ async def http_error(request: Request, exc: StarletteHTTPException):
 
 
 @app.get("/api-docs", response_class=HTMLResponse)
-async def api_docs():
+async def api_docs(request: Request, lang: str | None = None):
+    """The partner docs in Russian or English: the RU/EN link on the page (?lang=, remembered in a cookie) → the
+    language the site was last shown in (the same cookie, set by the site) → the browser's language."""
+    chosen = lang if lang in i18n.LANGS else None
+    lang = chosen or (request.cookies.get("sh_lang") if request.cookies.get("sh_lang") in i18n.LANGS else None) \
+        or i18n.lang_of((request.headers.get("accept-language") or "").split(",")[0] or None)
     v = asset_version()
-    html = (WEB / "docs.html").read_text(encoding="utf-8").replace("{{v}}", v).replace("{{base}}", settings.base_url)
-    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+    page = "docs.en.html" if lang == "en" else "docs.html"
+    html = (WEB / page).read_text(encoding="utf-8").replace("{{v}}", v).replace("{{base}}", settings.base_url)
+    resp = HTMLResponse(html, headers={"Cache-Control": "no-cache", "Content-Language": lang, "Vary": "Cookie, Accept-Language"})
+    if chosen:
+        resp.set_cookie("sh_lang", chosen, max_age=365 * 86400, samesite="lax", secure=settings.base_url.startswith("https"))
+    return resp
 
 _index_cache: dict[str, str] = {}
 

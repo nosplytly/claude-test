@@ -1,0 +1,44 @@
+/* The API docs page (docs.html / docs.en.html), on top of app.css. */
+.docs { position: relative; z-index: 2; width: 100%; max-width: 920px; margin: 0 auto; padding: 8px 16px 40px; }
+.docs h1 { font-size: clamp(28px, 5vw, 40px); font-weight: 800; letter-spacing: -.035em; margin: 18px 0 8px; }
+.docs .lead { color: var(--muted); font-size: 16px; max-width: 640px; margin: 0 0 26px; }
+.docs h2 { font-size: 22px; font-weight: 800; letter-spacing: -.02em; margin: 44px 0 12px; scroll-margin-top: 20px; }
+.docs h3 { font-size: 16px; font-weight: 800; margin: 26px 0 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; scroll-margin-top: 20px; }
+.docs p, .docs li { color: #c9c9ce; font-size: 14.5px; line-height: 1.65; }
+.docs code { font-family: var(--mono); font-size: 13px; background: rgba(255,255,255,.06); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; color: var(--text); }
+.docs pre { margin: 10px 0 16px; padding: 16px 18px; border-radius: 16px; background: #0f0f12; border: 1px solid var(--line); overflow: auto; }
+.docs pre code { background: none; border: 0; padding: 0; font-size: 12.8px; line-height: 1.6; color: #d8dcff; white-space: pre; }
+.m { font-family: var(--mono); font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 7px; }
+.m.get { background: rgba(43,89,255,.16); color: #9fb4ff; }
+.m.post { background: rgba(247,247,245,.92); color: var(--ink); }
+.path { font-family: var(--mono); font-size: 14.5px; font-weight: 600; }
+.panel { padding: 18px 20px; border-radius: 20px; background: var(--panel); border: 1px solid var(--line); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.grid3 .panel b { display: block; font-size: 15px; margin-bottom: 4px; }
+.grid3 .panel span { color: var(--muted); font-size: 13.5px; }
+.grid3 .n { width: 30px; height: 30px; border-radius: 9px; background: var(--blue); color: #fff; display: grid; place-items: center; font-weight: 800; margin-bottom: 10px; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 14px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 700; font-size: 12.5px; }
+td { color: #d6d6da; }
+.toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
+.toc a { text-decoration: none; }
+@media (max-width: 720px) { .grid3 { grid-template-columns: 1fr; } }
+/* Readability and small-screen refinements, retaining the original design. */
+.docs { min-width: 0; }
+.docs .lead { line-height: 1.7; }
+.docs pre { max-width: 100%; border-color: rgba(255,255,255,.12); scrollbar-color: #505469 transparent; scrollbar-width: thin; }
+.docs pre code { color: #e1e5ff; line-height: 1.75; }
+.docs .path { min-width: 0; overflow-wrap: anywhere; }
+.docs .panel { min-width: 0; }
+.docs .panel span { line-height: 1.65; }
+.docs .table-scroll { max-width: 100%; overflow-x: auto; margin: 8px 0 16px; scrollbar-color: #505469 transparent; scrollbar-width: thin; }
+.docs .table-scroll table { margin: 0; }
+.docs th, .docs td { line-height: 1.65; }
+.docs :focus-visible { outline: 2px solid #7592ff; outline-offset: 3px; }
+@media (max-width: 720px) {
+  .docs pre { padding: 14px; }
+  .docs pre code { font-size: 12px; }
+  .docs .table-scroll table { min-width: 420px; }
+}
+.top-actions .doc-lang { min-width: 44px; justify-content: center; }

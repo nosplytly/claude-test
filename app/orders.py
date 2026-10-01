@@ -42,6 +42,7 @@ RESERVING = ("awaiting_payment", "paid", "submitting", "queued", "uncertain")  #
 PAY_TOLERANCE_MICRO = 20_000  # we absorb a shortfall of up to $0.02 (rounding by wallets/exchanges)
 LATE_GRACE = timedelta(minutes=10)  # payments seen this long after expiry still pay the order
 STEAM_LOGIN_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,64}$")
+CYRILLIC = re.compile("[А-Яа-яЁё]")
 CUR_SIGN = {"RUB": "₽", "KZT": "₸", "UAH": "₴", "USD": "$"}
 
 
@@ -56,8 +57,15 @@ class InsufficientBalance(OrderError):
 
 
 def reason_text(reason: str | None, lang: str | None = None) -> str | None:
-    """Our own reasons are stored as keys ("reason.…"); the supplier's arrive as text and stay as they are."""
-    return t(reason, lang) if reason and reason.startswith("reason.") else reason
+    """Our own reasons are stored as keys ("reason.…"); the supplier's arrive as Russian text: a Russian-speaking
+    customer sees it as it is, anyone else a plain "declined by the supplier"."""
+    if not reason:
+        return reason
+    if reason.startswith("reason."):
+        return t(reason, lang)
+    if (lang if lang in i18n.LANGS else i18n.current.get()) != "ru" and CYRILLIC.search(reason):
+        return t("reason.rejected_by_supplier", lang)
+    return reason
 
 
 def discount_for(user: User | None) -> Decimal:
@@ -443,7 +451,7 @@ async def _on_submit_error(order_id: int, err: NervixyError) -> None:
             lang = await i18n.lang_of_user(s, o.user_id)
             await outbox.to_user(s, o.user_id, f"{e('fail')} {t('notify.failed.title', lang)}\n"
                                  + panel(t("notify.account_line", lang, login=esc(login), amount=amt),
-                                         t("notify.reason", lang, reason=esc(err.message)))
+                                         t("notify.reason", lang, reason=esc(reason_text(err.message, lang))))
                                  + f"\n{e('refund')} {t('notify.refunded_retry', lang, price=price)}",
                                  customer_kb(lang, again=True))
     if requeue:

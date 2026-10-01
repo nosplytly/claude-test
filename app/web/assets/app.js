@@ -1,4 +1,4 @@
-import { LOCALE, hooks as i18nHooks } from './i18n.js';  // first: it translates the page as app.js fills it
+import { LANG, LOCALE, hooks as i18nHooks, t } from './i18n.js';  // first: the page's language is set before anything else
 import { playIntro } from './intro.js';
 import { startBackground } from './bg.js';
 
@@ -9,11 +9,11 @@ const COIN_ICON = (c) => `/assets/coins/${c.toLowerCase()}.svg`;
 const COIN_NAME = { USDT: 'Tether USD', BTC: 'Bitcoin', ETH: 'Ethereum', TON: 'Toncoin', LTC: 'Litecoin', TRX: 'TRON', SOL: 'Solana', BNB: 'BNB' };
 const NET_ICON = { TRC20: 'trx', BEP20: 'bnb', ERC20: 'eth', SOL: 'sol', TON: 'ton' };
 const DEP_CHIPS = [10, 25, 50, 100];
-const CONFIRM_ETA = {
-  usdt_trc20: 'около минуты', trx: 'около минуты', usdt_ton: 'за несколько секунд', ton: 'за несколько секунд',
-  usdt_sol: 'за несколько секунд', sol: 'за несколько секунд', usdt_bep20: 'меньше минуты', usdt_erc20: 'за 2–3 минуты',
-  eth: 'за 2–3 минуты', btc: 'за 10–20 минут', ltc: 'за 5–10 минут',
+const CONFIRM_ETA = {  // how long the network takes to confirm a payment (keys of the texts)
+  usdt_trc20: 'eta.minute', trx: 'eta.minute', usdt_ton: 'eta.seconds', ton: 'eta.seconds', usdt_sol: 'eta.seconds',
+  sol: 'eta.seconds', usdt_bep20: 'eta.under_minute', usdt_erc20: 'eta.2_3', eth: 'eta.2_3', btc: 'eta.10_20', ltc: 'eta.5_10',
 };
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 // ------------------------------------------------------------------ Telegram Mini App
 // Opened from the bot, Telegram adds its signed launch data to the URL fragment (#tgWebAppData=… or #/path?tgWebAppData=…).
@@ -80,7 +80,7 @@ const S = {
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {
     method,
-    headers: { 'X-SH': '1', ...(body ? { 'Content-Type': 'application/json' } : {}),
+    headers: { 'X-SH': '1', 'X-SH-Lang': LANG, ...(body ? { 'Content-Type': 'application/json' } : {}),
       ...(TG.session ? { 'X-SH-Session': TG.session } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
@@ -88,7 +88,7 @@ async function api(path, { method = 'GET', body } = {}) {
   let data = null;
   try { data = await res.json(); } catch { /* empty */ }
   if (!res.ok) {
-    const err = new Error((data && data.detail) || 'Ошибка сети, попробуйте ещё раз');
+    const err = new Error((data && data.detail) || t('err.network'));
     err.status = res.status;
     throw err;
   }
@@ -199,7 +199,7 @@ async function copy(text, btn) {
       setTimeout(() => { btn.classList.remove('copied'); ic.innerHTML = '<svg class="i"><use href="#i-copy"/></svg>'; }, 1400);
     }
   }
-  toast('Скопировано');
+  toast(t('toast.copied'));
 }
 
 function copyBox(text, mono = true) {
@@ -367,7 +367,7 @@ $('#userMenu').addEventListener('click', async (e) => {
   if (act === 'deposit') location.hash = '#/deposit';
   if (act === 'logout') {
     await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
-    S.user = null; renderUser(); markSoon(false); location.hash = '#/'; toast('Вы вышли');
+    S.user = null; renderUser(); markSoon(false); location.hash = '#/'; toast(t('toast.signed_out'));
   }
 });
 $('#loginBtn').addEventListener('click', () => openLogin());
@@ -400,7 +400,7 @@ function openLogin() {
     m.onClose = () => { if (!S.user) S.pendingSubmit = false; };
     return;
   }
-  if (!S.cfg?.bot) { toast('Вход через Telegram временно недоступен', true); return; }
+  if (!S.cfg?.bot) { toast(t('lm.unavailable'), true); return; }
   const m = openModal('tplLogin');
   let timer = 0, alive = true;
   const stop = () => { alive = false; clearInterval(timer); document.removeEventListener('visibilitychange', tick); };
@@ -412,7 +412,7 @@ function openLogin() {
 
   async function start() {
     showCode('··');
-    wait.textContent = 'Ждём подтверждения в боте…';
+    wait.textContent = t('lm.wait');
     try {
       const r = await api('/api/auth/start', { method: 'POST' });
       if (!alive) return;
@@ -432,10 +432,10 @@ function openLogin() {
       else if (r.status === 'expired' || r.status === 'cancelled' || r.status === 'none') {
         clearInterval(timer);
         wait.innerHTML = '';
-        const b = el('button', 'link-btn', 'Получить новый код');
+        const b = el('button', 'link-btn', t('lm.new_code'));
         b.type = 'button';
         b.onclick = start;
-        wait.append(r.status === 'cancelled' ? 'Вход отменён в боте. ' : 'Код устарел. ', b);
+        wait.append(r.status === 'cancelled' ? t('lm.cancelled') : t('lm.expired'), b);
       }
     } catch { /* retry on next tick */ }
   }
@@ -447,7 +447,7 @@ function onLoggedIn(user) {
   S.user = user;
   renderUser();
   api('/api/waitlist').then((r) => markSoon(r.joined)).catch(() => {});  // maybe joined through the bot earlier
-  toast(`Вы вошли: ${user.name}`);
+  toast(t('toast.signed_in', { name: user.name }));
   if (S.pendingSubmit) { S.pendingSubmit = false; submitOrder(); }
   else route();
 }
@@ -526,10 +526,10 @@ function cleanMoneyInput(input) {
 
 function amountError() {
   const c = curCfg();
-  if (!c) return 'Пополнение временно недоступно';
+  if (!c) return t('amount.unavailable');
   const a = parseAmount();
-  if (!a) return 'Введите сумму';
-  if (a < +c.min || a > +c.max) return `Сумма от ${fmtFiat(+c.min, c.code)} до ${fmtFiat(+c.max, c.code)}`;
+  if (!a) return t('amount.enter');
+  if (a < +c.min || a > +c.max) return t('amount.range', { min: fmtFiat(+c.min, c.code), max: fmtFiat(+c.max, c.code) });
   return null;
 }
 
@@ -549,7 +549,7 @@ function showAmountHint(force = false) {
   $('#fAmount').classList.toggle('bad', !!showErr);
   $('#amount').setAttribute('aria-invalid', String(!!showErr));
   $('#amountHint').className = 'hint' + (showErr ? ' err' : '');
-  $('#amountHint').textContent = showErr ? err : `от ${fmtFiat(+c.min, c.code)} до ${fmtFiat(+c.max, c.code)}`;
+  $('#amountHint').textContent = showErr ? err : t('amount.hint', { min: fmtFiat(+c.min, c.code), max: fmtFiat(+c.max, c.code) });
 }
 
 function quote() {
@@ -582,20 +582,20 @@ function compute() {
     if (q.fromBal > 0) setText($('#sBal'), `−${fmtUsd(q.fromBal)}`);
     if (q.covers) {
       setText($('#sPay'), fmtUsd(0));
-      $('#sNote').textContent = 'вся сумма спишется с баланса сайта';
+      $('#sNote').textContent = t('note.full_balance');
     } else if (q.m && q.coinAmt) {
       setText($('#sPay'), `≈ ${fmtCoin(q.coinAmt, q.m.step)} ${q.m.coin}`);
       const minUsd = +q.m.min_usd || 0;
       $('#sNote').textContent = q.due < minUsd
-        ? `минимальный перевод в ${q.m.coin} — ${fmtUsd(minUsd)}, лишнее останется на балансе сайта`
-        : `${fmtUsd(q.due)} · точная сумма будет в счёте`;
+        ? t('note.min_transfer', { coin: q.m.coin, usd: fmtUsd(minUsd) })
+        : t('note.exact', { usd: fmtUsd(q.due) });
     } else {
       setText($('#sPay'), fmtUsd(q.due));
-      $('#sNote').textContent = q.m ? '' : 'выберите, чем оплатите';
+      $('#sNote').textContent = q.m ? '' : t('note.choose_coin');
     }
   }
   const blocked = S.unavailable && !(q?.covers && S.cfg.currencies.length && !S.cfg.methods.length);
-  const txt = blocked ? S.unavailable : !S.user ? 'Войти и оплатить' : q && q.covers ? 'Оплатить с баланса' : 'Перейти к оплате';
+  const txt = blocked ? S.unavailable : !S.user ? t('cta.signin_pay') : q && q.covers ? t('cta.pay_balance') : t('cta.pay');
   if (!$('#cta').classList.contains('loading')) {
     $('#ctaText').textContent = txt;
     $('#cta').disabled = !!blocked;
@@ -617,7 +617,7 @@ function setLoginState(kind, msg) {
     hint.textContent = msg;
   } else {
     hint.className = 'hint';
-    hint.innerHTML = 'Логин для входа в Steam, <b>не никнейм</b>. <button type="button" class="link-btn" id="whereLogin">Где найти?</button>';
+    hint.innerHTML = t('form.login_hint_html');
     $('#whereLogin').addEventListener('click', () => openModal('tplWhere'));
   }
 }
@@ -625,7 +625,7 @@ function setLoginState(kind, msg) {
 async function checkLogin(v) {
   if (!LOGIN_RE.test(v)) {
     S.login = { value: v, valid: false };
-    setLoginState('bad', 'Только латиница, цифры и символы _ - . (3–64 символа)');
+    setLoginState('bad', t('login.rule'));
     return false;
   }
   if (S.login.value === v && S.login.valid !== null) return S.login.valid;
@@ -635,7 +635,7 @@ async function checkLogin(v) {
     const r = await api('/api/steam/check', { method: 'POST', body: { login: v } });
     if ($('#login').value.trim() !== v) return null;
     S.login = { value: v, valid: r.valid };
-    setLoginState(r.valid ? 'ok' : 'bad', r.valid ? 'Аккаунт найден — можно пополнять' : r.message);
+    setLoginState(r.valid ? 'ok' : 'bad', r.valid ? t('login.ok') : r.message);
     return r.valid;
   } catch (e) {
     S.login = { value: v, valid: null };
@@ -668,28 +668,28 @@ async function submitOrder() {
   if (cta.classList.contains('loading') || !curCfg()) return;
   S.touched = true;
   const login = $('#login').value.trim();
-  if (!login) { setLoginState('bad', 'Укажите логин Steam'); $('#login').focus(); return; }
+  if (!login) { setLoginState('bad', t('login.enter')); $('#login').focus(); return; }
   if (amountError()) { showAmountHint(true); $('#amount').focus(); return; }
   const q = quote();
-  if (!q) { toast('Не удалось рассчитать сумму. Обновите страницу и попробуйте ещё раз.', true); return; }
+  if (!q) { toast(t('err.calc'), true); return; }
   if (S.unavailable && !q.covers) return;
   if (!q.covers && !pick.st.method) {
     $('#fMethod').classList.add('bad');
     $('#coins').setAttribute('aria-invalid', 'true');
     $('#coins').setAttribute('aria-describedby', 'methodHint');
     $('#methodHint').hidden = false;
-    $('#methodHint').textContent = 'Выберите монету для оплаты';
+    $('#methodHint').textContent = t('err.choose_coin');
     return;
   }
   if (!S.user) { S.pendingSubmit = true; openLogin(); return; }
 
   cta.classList.add('loading');
   cta.disabled = true;
-  $('#ctaText').textContent = 'Проверяем логин…';
+  $('#ctaText').textContent = t('cta.checking');
   try {
     const ok = await checkLogin(login);
     if (ok === false) { $('#login').focus(); return; }
-    $('#ctaText').textContent = 'Создаём счёт…';
+    $('#ctaText').textContent = t('cta.creating');
     const o = await api('/api/orders', {
       method: 'POST',
       body: { steam_login: login, amount: String(parseAmount()), currency: S.currency, method: pick.st.method,
@@ -729,16 +729,16 @@ async function applyPromo() {
   try {
     const r = await api('/api/promo/check', { method: 'POST', body: { code } });
     if (r.kind === 'bonus') {  // balance bonus: credit it right away
-      if (!S.user) { toast('Войдите, чтобы зачислить бонус на баланс'); openLogin(); return; }
+      if (!S.user) { toast(t('promo.signin_bonus')); openLogin(); return; }
       const x = await api('/api/promo/redeem', { method: 'POST', body: { code } });
       closePromo();
-      toast(`Промокод ${r.code}: ${x.label}`);
+      toast(t('promo.redeemed', { code: r.code, label: x.label }));
       refreshUser();
       return;
     }
     S.promo = { code: r.code, total: +r.total, label: r.label };
     renderPromo();
-    toast(`Промокод ${r.code} применён: скидка ${fmtPct(S.promo.total)}`);
+    toast(t('promo.applied', { code: r.code, pct: fmtPct(S.promo.total) }));
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -789,10 +789,10 @@ function renderDepositForm() {
 }
 
 function depositError() {
-  if (!S.cfg) return 'Сервис временно недоступен';
+  if (!S.cfg) return t('service.unavailable');
   const a = num($('#depAmount'));
-  if (!a) return 'Введите сумму';
-  if (a < +S.cfg.deposit_min || a > +S.cfg.deposit_max) return `Сумма от ${fmtUsd(+S.cfg.deposit_min)} до ${fmtUsd(+S.cfg.deposit_max)}`;
+  if (!a) return t('amount.enter');
+  if (a < +S.cfg.deposit_min || a > +S.cfg.deposit_max) return t('amount.range', { min: fmtUsd(+S.cfg.deposit_min), max: fmtUsd(+S.cfg.deposit_max) });
   return null;
 }
 
@@ -804,7 +804,7 @@ function computeDeposit() {
   $('#fDep').classList.toggle('bad', !!err && a > 0);
   $('#depAmount').setAttribute('aria-invalid', String(!!err && a > 0));
   $('#depHint').className = 'hint' + (err && a > 0 ? ' err' : '');
-  $('#depHint').textContent = err && a > 0 ? err : `от ${fmtUsd(+S.cfg.deposit_min)} до ${fmtUsd(+S.cfg.deposit_max)} · зачисляется в USD`;
+  $('#depHint').textContent = err && a > 0 ? err : t('dep.hint', { min: fmtUsd(+S.cfg.deposit_min), max: fmtUsd(+S.cfg.deposit_max) });
   const bal = S.user ? +S.user.balance : 0;
   const m = dpick.method();
   const minUsd = +(m?.min_usd || 0);
@@ -814,11 +814,11 @@ function computeDeposit() {
   const c = !err ? coinAmount(m, a) : null;
   setText($('#depPay'), c ? `≈ ${fmtCoin(c, m.step)} ${m.coin}` : '—');
   $('#depNote').textContent = !c ? '' : a < minUsd
-    ? `минимальный перевод в ${m.coin} — ${fmtUsd(minUsd)}, на баланс зачислится вся сумма`
-    : 'точная сумма будет в счёте';
+    ? t('note.min_transfer_dep', { coin: m.coin, usd: fmtUsd(minUsd) })
+    : t('note.exact_short');
   if (!$('#depCta').classList.contains('loading')) {
     $('#depCta').disabled = !S.cfg.methods.length;
-    $('#depCtaText').textContent = !S.cfg.methods.length ? 'Приём оплаты скоро откроется' : S.user ? 'Создать счёт' : 'Войти и пополнить';
+    $('#depCtaText').textContent = !S.cfg.methods.length ? t('payments.soon') : S.user ? t('dep.cta') : t('dep.signin');
   }
 }
 
@@ -932,9 +932,9 @@ function renderPay(kind, d, first) {
   const wasHidden = $('#viewPay').hidden;
   showView('viewPay');
   const isOrder = kind === 'order';
-  $('#payTitle').textContent = isOrder ? `Заказ ${d.id}` : 'Пополнение баланса';
-  $('#paySub').textContent = isOrder ? `${d.steam_login} · ${fmtFiat(+d.amount, d.currency)}` : `${fmtUsd(+d.usd)} на баланс · ${d.id}`;
-  $('#step2Label').textContent = isOrder ? 'Пополнение' : 'Зачисление';
+  $('#payTitle').textContent = isOrder ? t('pay.order_title', { id: d.id }) : t('pay.deposit_title');
+  $('#paySub').textContent = isOrder ? `${d.steam_login} · ${fmtFiat(+d.amount, d.currency)}` : t('pay.deposit_sub', { usd: fmtUsd(+d.usd), id: d.id });
+  $('#step2Label').textContent = isOrder ? t('step.topup') : t('step.credit');
   renderSteps(d.stage);
 
   // orders carry the invoice inside; a deposit IS the invoice
@@ -962,30 +962,29 @@ function renderPay(kind, d, first) {
     $('#payMemoBox').hidden = !inv.comment;
     $('#payMemo').textContent = inv.comment || '';
     const netName = inv.network === inv.coin ? inv.network_title : `${inv.network_title} (${inv.network})`;
-    let warn = `Отправляйте только ${inv.coin} в сети ${netName}. Другая монета или сеть — потеря средств.`;
-    if (+inv.from_balance > 0) warn += ` С баланса сайта спишется ${fmtUsd(+inv.from_balance)}.`;
+    let warn = t('pay.warn', { coin: inv.coin, network: netName });
+    if (+inv.from_balance > 0) warn += t('pay.warn_balance', { usd: fmtUsd(+inv.from_balance) });
     $('#payWarn').textContent = warn;
   }
   if (paying && d.stage === 'pay') startTimer(inv.expires_at); else clearInterval(S.timer);
 
   const p = d.payment;
   if (d.stage === 'pay') {
-    setStatus('Ожидаем платёж', 'Обычно он появляется в сети через 10–60 секунд после отправки.');
+    setStatus(t('pay.waiting'), t('pay.waiting_text'));
   } else if (d.stage === 'confirming') {
-    const conf = p && p.required > 1 ? `Подтверждений: ${Math.min(p.confirmations, p.required)} из ${p.required}. ` : '';
-    const eta = CONFIRM_ETA[inv?.method] || 'обычно до пары минут';
-    setStatus('Платёж найден, ждём подтверждения сети', `${conf}Сеть подтверждает ${eta}.`, p?.tx_url);
+    const conf = p && p.required > 1 ? t('pay.confirmations', { n: Math.min(p.confirmations, p.required), of: p.required }) : '';
+    const eta = t(CONFIRM_ETA[inv?.method] || 'eta.default');
+    setStatus(t('pay.found'), conf + t('pay.network_confirms', { eta }), p?.tx_url);
   } else if (d.stage === 'topup') {
-    setStatus('Пополняем Steam…', d.status === 'queued' ? 'Заказ в очереди — выполним в ближайшие минуты.'
-      : 'Можно закрыть страницу — пришлём уведомление в Telegram.');
+    setStatus(t('pay.topping'), d.status === 'queued' ? t('pay.queued') : t('pay.close_page'));
   }
 }
 
 function setStatus(title, text, txUrl) {
   $('#stTitle').textContent = title;
-  const t = $('#stText');
-  t.textContent = text || '';
-  if (txUrl) t.append(Object.assign(el('a', null, ' Транзакция ↗'), { href: txUrl, target: '_blank', rel: 'noopener' }));
+  const box = $('#stText');
+  box.textContent = text || '';
+  if (txUrl) box.append(Object.assign(el('a', null, t('pay.tx')), { href: txUrl, target: '_blank', rel: 'noopener' }));
 }
 
 function startTimer(expiresAt) {
@@ -1003,7 +1002,7 @@ function startTimer(expiresAt) {
     $('#timer').classList.toggle('low', left < 5 * 60000);
     if (left <= 0) {
       clearInterval(S.timer);
-      setStatus('Время на оплату вышло', 'Не отправляйте оплату по этому счёту. Если уже отправили — деньги зачислятся на баланс сайта.');
+      setStatus(t('pay.expired'), t('pay.expired_text'));
     }
   };
   tick();
@@ -1019,36 +1018,34 @@ function renderResult(kind, d) {
   const title = $('#resTitle'), text = $('#resText');
   const main = $('#resMain'), second = $('#resSecond');
   second.hidden = false;
-  second.textContent = kind === 'order' ? 'Мои заказы' : 'История баланса';
+  second.textContent = kind === 'order' ? t('res.my_orders') : t('res.history');
   second.onclick = () => openCabinet(kind === 'order' ? 'orders' : 'balance');
   main.onclick = () => { location.hash = '#/'; };
-  const b = (t) => el('b', null, t);
   if (d.stage === 'done') {
     icon.setAttribute('d', 'M5 12.5l4.5 4.5L19 7.5');
-    title.textContent = kind === 'order' ? 'Готово!' : 'Баланс пополнен';
-    text.innerHTML = '';
+    title.textContent = kind === 'order' ? t('res.done') : t('res.funds_added');
     if (kind === 'order') {
-      text.append('Steam ', b(d.steam_login), ' пополнен на ', b(fmtFiat(+d.amount, d.currency)), '. Приятных покупок!');
-      $('#resMainText').textContent = 'Пополнить ещё';
+      text.innerHTML = t('res.steam_done_html', { login: esc(d.steam_login), amount: esc(fmtFiat(+d.amount, d.currency)) });
+      $('#resMainText').textContent = t('res.again');
     } else {
-      text.append('Зачислено ', b(fmtUsd(+d.received_usd)), '. Баланс оплатит следующие заказы — на сайте и через API.');
-      $('#resMainText').textContent = 'Пополнить Steam';
+      text.innerHTML = t('res.deposit_done_html', { usd: esc(fmtUsd(+d.received_usd)) });
+      $('#resMainText').textContent = t('res.topup_steam');
     }
     confetti();
     haptic('success');
   } else if (d.stage === 'failed') {
     mark.classList.add('fail');
     icon.setAttribute('d', 'M7 7l10 10M17 7 7 17');
-    title.textContent = 'Не удалось пополнить';
-    text.textContent = `${d.error ? `Причина: ${d.error}. ` : ''}${fmtUsd(+d.price_usd)} вернулись на баланс сайта — можно оформить заказ заново, он оплатится с баланса.`;
-    $('#resMainText').textContent = 'Оформить заново';
+    title.textContent = t('res.failed');
+    text.textContent = t('res.failed_text', { reason: d.error ? t('res.reason', { reason: d.error }) : '', usd: fmtUsd(+d.price_usd) });
+    $('#resMainText').textContent = t('res.order_again');
     main.onclick = () => { prefill(d); location.hash = '#/'; };
   } else {
     mark.classList.add('idle');
     icon.setAttribute('d', d.stage === 'expired' ? 'M12 7v5l3 2' : 'M7 7l10 10M17 7 7 17');
-    title.textContent = d.stage === 'expired' ? 'Время на оплату вышло' : 'Заказ отменён';
-    text.textContent = 'Если оплата всё же придёт на этот счёт, она зачислится на баланс сайта.';
-    $('#resMainText').textContent = kind === 'order' ? 'Создать новый заказ' : 'Создать новый счёт';
+    title.textContent = d.stage === 'expired' ? t('pay.expired') : t('res.cancelled');
+    text.textContent = t('res.cancelled_text');
+    $('#resMainText').textContent = kind === 'order' ? t('res.new_order') : t('res.new_invoice');
     main.onclick = () => { if (kind === 'order') { prefill(d); location.hash = '#/'; } else location.hash = '#/deposit'; };
   }
   refreshUser();
@@ -1092,8 +1089,8 @@ $('#cancelBtn').addEventListener('click', async (e) => {
   const b = e.currentTarget;
   if (!b.dataset.sure) {
     b.dataset.sure = '1';
-    b.textContent = 'Точно отменить? Нажмите ещё раз';
-    setTimeout(() => { delete b.dataset.sure; b.textContent = 'Отменить заказ'; }, 4000);
+    b.textContent = t('pay.cancel_confirm');
+    setTimeout(() => { delete b.dataset.sure; b.textContent = t('pay.cancel'); }, 4000);
     return;
   }
   try {
@@ -1102,7 +1099,7 @@ $('#cancelBtn').addEventListener('click', async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 $('#devPayBtn').addEventListener('click', async () => {
-  try { await api(`/api/dev/pay/${S.pay.id}`, { method: 'POST' }); toast('Симулирован входящий платёж'); }
+  try { await api(`/api/dev/pay/${S.pay.id}`, { method: 'POST' }); toast(t('pay.dev_done')); }
   catch (e) { toast(e.message, true); }
 });
 $('#claimBtn').addEventListener('click', () => {
@@ -1111,7 +1108,7 @@ $('#claimBtn').addEventListener('click', () => {
   $('.cl-go', m.node).addEventListener('click', async () => {
     const input = $('#txid', m.node);
     const txid = input.value.trim();
-    if (txid.length < 20) { input.setAttribute('aria-invalid', 'true'); input.focus(); toast('Вставьте хэш транзакции', true); return; }
+    if (txid.length < 20) { input.setAttribute('aria-invalid', 'true'); input.focus(); toast(t('claim.paste'), true); return; }
     const base = S.pay.kind === 'order' ? '/api/orders/' : '/api/deposits/';
     try {
       const r = await api(`${base}${S.pay.id}/claim`, { method: 'POST', body: { txid } });
@@ -1122,10 +1119,10 @@ $('#claimBtn').addEventListener('click', () => {
 });
 
 // ------------------------------------------------------------------ cabinet (orders / balance / API)
-const PILL = {
-  awaiting_payment: ['ждёт оплату', 'wait'], paid: ['оплачен', 'wait'], submitting: ['пополняется', 'wait'],
-  queued: ['в очереди', 'wait'], uncertain: ['пополняется', 'wait'], processing: ['пополняется', 'wait'],
-  delivered: ['готово', 'ok'], rejected: ['возврат на баланс', 'bad'], expired: ['истёк', ''], cancelled: ['отменён', ''],
+const PILL = {  // order status → [text key, colour]
+  awaiting_payment: ['pill.awaiting_payment', 'wait'], paid: ['pill.paid', 'wait'], submitting: ['pill.in_progress', 'wait'],
+  queued: ['pill.queued', 'wait'], uncertain: ['pill.in_progress', 'wait'], processing: ['pill.in_progress', 'wait'],
+  delivered: ['pill.delivered', 'ok'], rejected: ['pill.rejected', 'bad'], expired: ['pill.expired', ''], cancelled: ['pill.cancelled', ''],
 };
 
 function openCabinet(tab = 'orders') {
@@ -1150,7 +1147,7 @@ const LOADERS = {
     try {
       const { orders } = await api('/api/orders');
       list.innerHTML = '';
-      if (!orders.length) { list.innerHTML = '<div class="empty">Заказов пока нет</div>'; return; }
+      if (!orders.length) { list.replaceChildren(el('div', 'empty', t('cb.no_orders'))); return; }
       for (const o of orders) {
         const [label, cls] = PILL[o.status] || [o.status, ''];
         const b = el('button', 'o-item');
@@ -1159,7 +1156,7 @@ const LOADERS = {
         $('.o-main b', b).textContent = `${fmtFiat(+o.amount, o.currency)} → ${o.steam_login}`;
         $('.o-main span', b).textContent = `${o.id} · ${fmtDate(o.created_at)}`;
         const pill = $('.pill', b);
-        pill.textContent = label;
+        pill.textContent = PILL[o.status] ? t(label) : label;
         if (cls) pill.classList.add(cls);
         b.addEventListener('click', () => { m.close(); location.hash = `#/order/${o.id}`; });
         list.appendChild(b);
@@ -1174,7 +1171,7 @@ const LOADERS = {
       $('.cb-bal', m.node).textContent = fmtUsd(+r.balance);
       if (S.user) { S.user.balance = r.balance; renderUser(); }
       box.innerHTML = '';
-      if (!r.items.length) { box.innerHTML = '<div class="empty">Движений по балансу пока нет</div>'; return; }
+      if (!r.items.length) { box.replaceChildren(el('div', 'empty', t('cb.no_history'))); return; }
       for (const it of r.items) {
         const row = el('div', 'h-item');
         const main = el('div', 'h-main');
@@ -1197,40 +1194,39 @@ async function renderApiPane(m) {
 
   // intro
   const intro = el('div', 'api-block');
-  intro.innerHTML = `<h4>API для партнёров</h4><p>Подключите свой сервис или бота: пополняйте баланс криптой и создавайте
-    пополнения Steam автоматически. Заказы через API оплачиваются с баланса. <a href="/api-docs" target="_blank">Документация →</a></p>`;
-  intro.append(kv('Ваша скидка', `${acc.user.discount}%`), kv('Баланс', fmtUsd(+acc.user.balance)));
+  intro.innerHTML = t('api.intro_html');
+  intro.append(kv(t('api.discount'), `${acc.user.discount}%`), kv(t('api.balance'), fmtUsd(+acc.user.balance)));
   pane.append(intro);
 
   // key
   const keyBlock = el('div', 'api-block');
-  keyBlock.append(el('h4', null, 'API-ключ'));
+  keyBlock.append(el('h4', null, t('api.key_title')));
   const k = acc.api_key;
   if (k) {
-    keyBlock.append(kv('Ключ', `${k.prefix}…`), kv('Создан', fmtDate(k.created_at)),
-      kv('Последний запрос', k.last_used_at ? `${fmtDate(k.last_used_at)} · ${k.last_ip || ''}` : 'ещё не было'));
+    keyBlock.append(kv(t('api.key'), `${k.prefix}…`), kv(t('api.created'), fmtDate(k.created_at)),
+      kv(t('api.last'), k.last_used_at ? `${fmtDate(k.last_used_at)} · ${k.last_ip || ''}` : t('api.never')));
   } else {
-    keyBlock.append(el('p', null, 'Ключа ещё нет. Он показывается один раз — сохраните его в надёжном месте.'));
+    keyBlock.append(el('p', null, t('api.no_key')));
   }
   const keyBtns = el('div', 'btn-row');
   keyBtns.style.marginTop = '12px';
-  const gen = el('button', 'btn-sm primary', k ? 'Перевыпустить' : 'Создать ключ');
+  const gen = el('button', 'btn-sm primary', k ? t('api.reissue') : t('api.create'));
   gen.type = 'button';
   gen.onclick = async () => {
-    if (k && !confirm('Старый ключ перестанет работать. Перевыпустить?')) return;
+    if (k && !confirm(t('api.reissue_confirm'))) return;
     try {
       const r = await api('/api/account/api-key', { method: 'POST' });
       await renderApiPane(m);
-      showSecret($('.cb-api', m.node), 'Ваш API-ключ — сохраните его, больше мы его не покажем:', r.key);
+      showSecret($('.cb-api', m.node), t('api.your_key'), r.key);
     } catch (e) { toast(e.message, true); }
   };
   keyBtns.append(gen);
   if (k) {
-    const rev = el('button', 'btn-sm danger', 'Отозвать');
+    const rev = el('button', 'btn-sm danger', t('api.revoke'));
     rev.type = 'button';
     rev.onclick = async () => {
-      if (!confirm('Отозвать ключ? Запросы с ним перестанут работать.')) return;
-      try { await api('/api/account/api-key', { method: 'DELETE' }); await renderApiPane(m); toast('Ключ отозван'); }
+      if (!confirm(t('api.revoke_confirm'))) return;
+      try { await api('/api/account/api-key', { method: 'DELETE' }); await renderApiPane(m); toast(t('api.revoked')); }
       catch (e) { toast(e.message, true); }
     };
     keyBtns.append(rev);
@@ -1240,43 +1236,37 @@ async function renderApiPane(m) {
 
   // settings
   const set = el('div', 'api-block');
-  set.innerHTML = `<h4>Безопасность и уведомления</h4>
-    <div class="field"><label for="apiIps">IP-адреса, с которых разрешён ключ</label>
-      <input class="input mono" id="apiIps" placeholder="пусто = любые; через запятую" spellcheck="false"></div>
-    <div class="field"><label for="apiHook">Webhook URL</label>
-      <input class="input mono" id="apiHook" placeholder="https://your-service.com/sh-webhook" spellcheck="false"></div>
-    <p>Пришлём POST при событиях <b>order.delivered</b>, <b>order.rejected</b>, <b>deposit.credited</b>.
-      Подпись — заголовок <b>X-SH-Signature</b> (HMAC-SHA256 тела вашим секретом).</p>`;
+  set.innerHTML = t('api.settings_html');
   $('#apiIps', set).value = k?.allowed_ips || '';
   $('#apiIps', set).disabled = !k;
-  if (!k) $('#apiIps', set).placeholder = 'сначала создайте ключ';
+  if (!k) $('#apiIps', set).placeholder = t('api.create_first');
   $('#apiHook', set).value = acc.webhook_url || '';
   const btns = el('div', 'btn-row');
-  const save = el('button', 'btn-sm primary', 'Сохранить');
+  const save = el('button', 'btn-sm primary', t('api.save'));
   save.type = 'button';
   save.onclick = async () => {
     try {
       const r = await api('/api/account/settings', { method: 'POST',
         body: { allowed_ips: $('#apiIps', set).value, webhook_url: $('#apiHook', set).value } });
-      toast('Сохранено');
-      if (r.webhook_secret) showSecret(set, 'Секрет для проверки подписи вебхуков — сохраните, больше не покажем:', r.webhook_secret);
+      toast(t('api.saved'));
+      if (r.webhook_secret) showSecret(set, t('api.secret'), r.webhook_secret);
     } catch (e) { toast(e.message, true); }
   };
   btns.append(save);
   if (acc.webhook_url) {
-    const test = el('button', 'btn-sm', 'Тестовый вебхук');
+    const test = el('button', 'btn-sm', t('api.test'));
     test.type = 'button';
     test.onclick = async () => {
-      try { await api('/api/account/webhook-test', { method: 'POST' }); toast('Отправляем webhook.test'); }
+      try { await api('/api/account/webhook-test', { method: 'POST' }); toast(t('api.test_sent')); }
       catch (e) { toast(e.message, true); }
     };
-    const sec = el('button', 'btn-sm', 'Новый секрет');
+    const sec = el('button', 'btn-sm', t('api.new_secret'));
     sec.type = 'button';
     sec.onclick = async () => {
-      if (!confirm('Старый секрет перестанет подходить. Сгенерировать новый?')) return;
+      if (!confirm(t('api.new_secret_confirm'))) return;
       try {
         const r = await api('/api/account/webhook-secret', { method: 'POST' });
-        showSecret(set, 'Новый секрет вебхуков — сохраните:', r.webhook_secret);
+        showSecret(set, t('api.new_secret_saved'), r.webhook_secret);
       } catch (e) { toast(e.message, true); }
     };
     btns.append(test, sec);
@@ -1307,11 +1297,11 @@ document.addEventListener('click', (e) => {
 });
 
 // ------------------------------------------------------------------ coming soon: the FunPay / Playerok plugin
-// "Узнать о запуске": signed in — straight onto the waiting list; otherwise through the bot (/start plugin).
+// "Notify me": signed in — straight onto the waiting list; otherwise through the bot (/start plugin).
 function markSoon(joined) {
   const cta = $('#soonCta');
   cta.classList.toggle('done', joined);
-  $('span', cta).textContent = joined ? 'Вы в списке' : 'Узнать о запуске';
+  $('span', cta).textContent = joined ? t('soon.joined') : t('soon.cta');
 }
 
 function initSoon() {
@@ -1326,7 +1316,7 @@ function initSoon() {
       try {
         const r = await api('/api/waitlist', { method: 'POST' });
         haptic('success');
-        toast(r.new ? 'Готово! Напишем в Telegram, как только плагин выйдет' : 'Вы уже в списке — напишем о запуске');
+        toast(r.new ? t('soon.toast_new') : t('soon.toast_again'));
         markSoon(true);
       } catch (e) { toast(e.message, true); }
     } else if (!link) { ev.preventDefault(); openLogin(); }
@@ -1345,8 +1335,8 @@ function showOfflineNotice() {
   if ($('.form-notice', $('#viewForm'))) return;
   const notice = el('div', 'form-notice');
   notice.setAttribute('role', 'status');
-  notice.append('Не удалось загрузить данные сервиса. Проверьте подключение и ');
-  const retry = el('a', 'link-btn', 'обновите страницу');
+  notice.append(t('offline.notice'));
+  const retry = el('a', 'link-btn', t('offline.reload'));
   retry.href = location.href;
   retry.addEventListener('click', (e) => { e.preventDefault(); location.reload(); });
   notice.append(retry, '.');
@@ -1376,7 +1366,7 @@ async function boot() {
       $('#intro')?.remove();
     });
   $('#cta').disabled = true;
-  $('#ctaText').textContent = 'Загружаем способы оплаты…';
+  $('#ctaText').textContent = t('boot.loading');
 
   try {
     if (miniApp) await initMiniApp();  // logs in first, so the config below already knows the user
@@ -1384,7 +1374,7 @@ async function boot() {
   } catch {
     await intro;
     $('#card').classList.add('card-in');
-    unavailable('Сервис временно недоступен');
+    unavailable(t('service.unavailable'));
     showOfflineNotice();
     return;
   }
@@ -1400,7 +1390,7 @@ async function boot() {
   if (!cfg.currencies.length) {
     await intro;
     $('#card').classList.add('card-in');
-    unavailable('Пополнение временно недоступно');
+    unavailable(t('amount.unavailable'));
     return;
   }
   const savedCur = store.get('sh_cur');
@@ -1415,7 +1405,7 @@ async function boot() {
   pick.render();
   dpick.render();
   renderDepositForm();
-  if (!cfg.methods.length) unavailable('Приём оплаты скоро откроется');
+  if (!cfg.methods.length) unavailable(t('payments.soon'));
   onAmount();
   renderUser();
   initSoon();
