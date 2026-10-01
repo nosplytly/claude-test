@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from .auth import client_ip
+from .i18n import t
 from .config import settings
 from .db import session_scope
 from .deposits import create_deposit, deposit_view
@@ -44,19 +45,19 @@ async def api_user(request: Request) -> User:
         key = request.headers["authorization"][7:]
     key = key.strip()
     if not key:
-        raise ApiError(401, "Нужен заголовок X-API-Key")
+        raise ApiError(401, t("api.key_required"))
     hit(f"apikey:{sha256(key)[:20]}", 120, 60)
     ip = client_ip(request)
     async with session_scope() as s:
         k = (await s.execute(select(ApiKey).where(ApiKey.key_hash == sha256(key), ApiKey.revoked.is_(False)))).scalar_one_or_none()
         if not k:
-            raise ApiError(401, "Неверный API-ключ")
+            raise ApiError(401, t("api.bad_key"))
         if k.allowed_ips and ip not in {x.strip() for x in k.allowed_ips.split(",") if x.strip()}:
-            raise ApiError(403, f"IP {ip} не в белом списке ключа")
+            raise ApiError(403, t("api.ip_not_allowed", ip=ip))
         k.last_used_at, k.last_ip = utcnow(), ip
         u = await s.get(User, k.user_id)
         if not u or u.is_banned:
-            raise ApiError(403, "Аккаунт заблокирован")
+            raise ApiError(403, t("err.account_blocked"))
         return u
 
 
@@ -74,7 +75,7 @@ async def rates(u: User = Depends(api_user)):
         r = await nervixy.rates()
         lim = {c: dict(zip(("min", "max"), map(plain, await limits(c)))) for c in CURRENCIES}
     except (NervixyError, NervixyTransportError) as e:
-        raise ApiError(503, "Курсы временно недоступны") from e
+        raise ApiError(503, t("api.rates_unavailable")) from e
     return {"ok": True, "base": "USD", "rates": {k: str(v) for k, v in r.items()}, "discount": plain(discount_for(u)),
             "limits": lim}
 
@@ -94,9 +95,9 @@ async def steam_check(body: PartnerLoginIn, u: User = Depends(api_user)):
     except NervixyError as e:
         if e.status == 400:
             return {"ok": True, "steam_login": body.steam_login, "valid": False}
-        raise ApiError(503, "Проверка временно недоступна") from e
+        raise ApiError(503, t("err.steam_check_unavailable")) from e
     except NervixyTransportError as e:
-        raise ApiError(503, "Проверка временно недоступна") from e
+        raise ApiError(503, t("err.steam_check_unavailable")) from e
     return {"ok": True, "steam_login": body.steam_login, "valid": valid}
 
 
@@ -107,7 +108,7 @@ async def quote(body: PartnerQuoteIn, u: User = Depends(api_user)):
         r = await nervixy.rates()
         lo, hi = await limits(cur)
     except (NervixyError, NervixyTransportError) as e:
-        raise ApiError(503, "Курсы временно недоступны") from e
+        raise ApiError(503, t("api.rates_unavailable")) from e
     nominal = amount / r[cur]
     price = to_micro(nominal * (1 - discount_for(u) / 100), up=True)
     return {"ok": True, "amount": plain(amount), "currency": cur, "nominal_usd": usd_str(to_micro(nominal), 6),
@@ -132,7 +133,7 @@ async def create(body: PartnerOrderIn, u: User = Depends(api_user)):
                                    method_code=None, source="api", external_id=ext, balance_only=True)
             view = public_order(o)
     except InsufficientBalance as e:
-        raise ApiError(402, "Недостаточно средств на балансе", balance_usd=usd_str(e.balance_micro, 6),
+        raise ApiError(402, t("api.insufficient"), balance_usd=usd_str(e.balance_micro, 6),
                        required_usd=usd_str(e.required_micro, 6)) from e
     except OrderError as e:
         raise ApiError(400, str(e)) from e
@@ -150,7 +151,7 @@ async def _find_order(u: User, **where) -> Order:
             q = q.where(getattr(Order, k) == v)
         o = (await s.execute(q)).scalar_one_or_none()
     if not o:
-        raise ApiError(404, "Заказ не найден")
+        raise ApiError(404, t("err.order_not_found"))
     return o
 
 
@@ -201,7 +202,7 @@ async def get_deposit(deposit_id: DepositId, u: User = Depends(api_user)):
     async with session_scope() as s:
         inv = (await s.execute(select(Invoice).where(Invoice.public_id == deposit_id, Invoice.user_id == u.id))).scalar_one_or_none()
         if not inv:
-            raise ApiError(404, "Пополнение не найдено")
+            raise ApiError(404, t("err.deposit_not_found"))
         return {"ok": True, "deposit": _public_deposit(await deposit_view(s, inv))}
 
 

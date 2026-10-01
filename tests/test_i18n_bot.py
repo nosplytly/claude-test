@@ -37,7 +37,7 @@ from app import orders as O  # noqa: E402
 from app.auth import create_session, start_login  # noqa: E402
 from app.db import init_db, session_scope  # noqa: E402
 from app.deposits import create_deposit  # noqa: E402
-from app.models import Claim, Invoice, LoginRequest, Order, Transfer, User as DbUser, Waitlist  # noqa: E402
+from app.models import Claim, Invoice, Order, User as DbUser, Waitlist  # noqa: E402
 from app.nervixy import nervixy  # noqa: E402
 from app.payments import monitor as M  # noqa: E402
 from app.payments.chains.base import Incoming  # noqa: E402
@@ -233,7 +233,7 @@ async def main():
     english(out, "подтверждение входа (браузер, IP, «Это не я»)")
     out = await press(EN_ID, f"lc:{tok}:{code}")
     txt = english(out, "«вход подтверждён» и всплывашка «Готово»")
-    check("Sign-in confirmed" in txt and any(isinstance(c, AnswerCallbackQuery) and c.text == "Done" for c in out),
+    check("signed in" in txt and any(isinstance(c, AnswerCallbackQuery) and c.text == "Done" for c in out),
           "…с правильными словами")
     check(any("/auth/tg?" in u and "lang=" not in u for u in links(out)), "одноразовая ссылка входа не тронута")
     async with session_scope() as s:
@@ -256,7 +256,7 @@ async def main():
     mark = len(session.calls)
     check((await drive(o.id)).status == "delivered", "заказ выполнен")
     txt = english(await to_chat(EN_ID, mark), "«готово, Steam пополнен»")
-    check("topped up with" in txt and "Enjoy" in txt, "…текст осмысленный: " + txt[:90])
+    check("has been topped up with" in txt and "Happy gaming" in txt, "…текст осмысленный: " + txt[:90])
     check(CYR.search(visible(await to_chat(ADMIN, mark)) or "Р"), "админу про тот же заказ — по-русски")
 
     mark = len(session.calls)
@@ -341,8 +341,9 @@ async def main():
         check((await s.execute(select(DbUser.lang).where(DbUser.tg_id == RU_ID))).scalar_one() == "en",
               "выбор сохранён в профиле (русский Telegram больше не важен)")
     i18n._chats.clear()
-    await notify.notify_user(ru.id, f"{B.e('ok')} <b>Готово!</b>")
-    check(visible(session.calls[-1:]) == "✅ Done!", "уведомления после перезапуска — тоже на выбранном языке")
+    check(await i18n.lang_for_chat(RU_ID) == "en", "после перезапуска язык берётся из профиля: уведомления — на выбранном")
+    async with session_scope() as s:
+        check(await i18n.lang_of_user(s, ru.id) == "en", "…и уведомления о деньгах пишутся на нём же")
     await press(RU_ID, "lang:ru", photo=True)
     check("Пополнить Steam" in visible(await send_text(RU_ID, "/start")), "вернул русский → снова по-русски")
 
@@ -397,9 +398,17 @@ async def main():
           "повторная рассылка не спамит тем, кто уже получил")
 
     print("9. надёжность")
-    check(i18n.to_en("Заказов пока нет.") == "No orders yet." and i18n.to_en("Заказ SH-1") == "Order SH-1",
-          "«Заказ» не откусывает кусок от «Заказов»")
-    check(i18n.to_en("gaben · 500 ₽") == "gaben · 500 ₽", "текст без русского не меняется")
+    ru_cat, en_cat = i18n.CATALOG["ru"], i18n.CATALOG["en"]
+    check(set(ru_cat) == set(en_cat), f"в ru и en одинаковые ключи ({len(ru_cat)})")
+    import string
+    fields = {k: ({f for _, f, _, _ in string.Formatter().parse(ru_cat[k]) if f},
+                  {f for _, f, _, _ in string.Formatter().parse(en_cat[k]) if f}) for k in ru_cat}
+    odd = [k for k, (a, b) in fields.items() if a != b]
+    check(not odd, f"подстановки ({{login}}, {{amount}}…) совпадают в обоих языках{': ' + ', '.join(odd) if odd else ''}")
+    bilingual = {"bot.lang.choose", "cmd.language"}  # the language switch shows both on purpose: findable from either
+    leftover = [k for k, v in en_cat.items() if CYR.search(v) and k not in bilingual]
+    check(not leftover, f"в английском каталоге нет русских слов{': ' + ', '.join(leftover) if leftover else ''}")
+    check(i18n.t("no.such.key", "en") == "no.such.key", "нет ключа → виден сам ключ (и ошибка в логе), а не падение")
 
     async def boom(*a, **k):
         raise RuntimeError("db down")
@@ -407,10 +416,10 @@ async def main():
     real = i18n.lang_for_chat
     i18n.lang_for_chat = boom
     try:
-        mid = await notify.send(EN_ID, "Готово")
+        mid = await notify.send(EN_ID, i18n.t("bot.done", "en"), [[("Site", "url:https://sh.test/")]])
     finally:
         i18n.lang_for_chat, i18n._chats = real, saved
-    check(mid is not None, "если перевод сломался — сообщение всё равно уходит (по-русски)")
+    check(mid is not None, "если язык чата не определился — сообщение всё равно уходит")
 
     print(f"\nALL GOOD: {OK} checks passed")
 

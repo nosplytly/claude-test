@@ -42,7 +42,6 @@ SCANNER = re.compile(
 BENIGN = re.compile(r"(?i)^/(favicon\.ico|apple-touch-icon[\w.-]*\.png|robots\.txt|sitemap\.xml|ads\.txt|"
                     r"manifest\.json|site\.webmanifest|browserconfig\.xml|\.well-known/.*)$")
 
-MESSAGE = "Доступ с вашего IP временно ограничен из-за подозрительной активности. Попробуйте позже."
 
 _bans: dict[str, dict] = {}  # key -> {"until": epoch, "reason": str}
 _history: dict[str, dict] = {}  # key -> {"n": bans so far, "last": epoch of the last ban}
@@ -183,13 +182,16 @@ def active() -> list[tuple[str, int, str]]:
     return sorted(rows, key=lambda r: -r[1])
 
 
-def blocked_response(path: str, left: int):
+def blocked_response(path: str, left: int, lang: str = "ru"):
+    from .i18n import t
+
     headers = {"Retry-After": str(left)}
+    message = t("err.ip_blocked", lang)
     if path.startswith("/api/v1"):
-        return JSONResponse({"ok": False, "error": MESSAGE}, status_code=403, headers=headers)
+        return JSONResponse({"ok": False, "error": message}, status_code=403, headers=headers)
     if path.startswith("/api/"):
-        return JSONResponse({"detail": MESSAGE}, status_code=403, headers=headers)
-    return PlainTextResponse(MESSAGE, status_code=403, headers=headers)
+        return JSONResponse({"detail": message}, status_code=403, headers=headers)
+    return PlainTextResponse(message, status_code=403, headers=headers)
 
 
 def _expire() -> None:

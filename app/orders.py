@@ -18,7 +18,8 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import events, outbox
+from . import events, i18n, outbox
+from .i18n import Problem, t
 from .config import settings
 from .db import session_scope
 from .ledger import change_balance
@@ -44,14 +45,19 @@ STEAM_LOGIN_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,64}$")
 CUR_SIGN = {"RUB": "₽", "KZT": "₸", "UAH": "₴", "USD": "$"}
 
 
-class OrderError(Exception):
-    """Message is shown to the customer."""
+class OrderError(Problem):
+    """Shown to the customer: a key from app/locales, rendered in their language."""
 
 
 class InsufficientBalance(OrderError):
     def __init__(self, balance_micro: int, required_micro: int):
-        super().__init__(f"Недостаточно средств на балансе: {usd_str(balance_micro)}$, нужно {usd_str(required_micro)}$")
+        super().__init__("order.insufficient", balance=usd_str(balance_micro), required=usd_str(required_micro))
         self.balance_micro, self.required_micro = balance_micro, required_micro
+
+
+def reason_text(reason: str | None, lang: str | None = None) -> str | None:
+    """Our own reasons are stored as keys ("reason.…"); the supplier's arrive as text and stay as they are."""
+    return t(reason, lang) if reason and reason.startswith("reason.") else reason
 
 
 def discount_for(user: User | None) -> Decimal:
@@ -69,7 +75,7 @@ def public_order(o: Order) -> dict:
             "steam_login": o.steam_login, "amount": plain(o.amount), "currency": o.currency,
             "price_usd": usd_str(o.price_micro, 6), "charged_usd": usd_str(o.charged_micro, 6),
             "created_at": iso(o.created_at), "finished_at": iso(o.finished_at),
-            "error": o.error if o.status == "rejected" else None}
+            "error": reason_text(o.error) if o.status == "rejected" else None}
 
 
 def method_label(code: str | None) -> str:
@@ -81,6 +87,12 @@ def method_label(code: str | None) -> str:
 
 def site(path: str = "/") -> str:
     return settings.base_url.rstrip("/") + path
+
+
+def customer_kb(lang: str, *, again: bool = False):
+    """«Order again» (or «Top up Steam») + «Support», in the customer's language."""
+    return kb([btn(t("btn.order_again" if again else "btn.topup_steam", lang), url=site("/"), style=PRIMARY, icon="rocket")],
+              [btn(t("btn.support", lang), url=settings.support_url, icon="support") if settings.support_url else None])
 
 
 def fmt_amount(amount: Decimal, currency: str) -> str:
@@ -123,15 +135,15 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
     steam_login = (steam_login or "").strip()
     currency = (currency or "").upper()
     if currency not in CURRENCIES:
-        raise OrderError("Неизвестная валюта")
+        raise OrderError("order.unknown_currency")
     if not STEAM_LOGIN_RE.match(steam_login):
-        raise OrderError("Логин Steam: 3–64 символа — латиница, цифры, _ - .")
+        raise OrderError("err.login_format")
     try:
         amount = D(amount).quantize(Decimal("0.01"))
     except Exception as err:  # noqa: BLE001
-        raise OrderError("Некорректная сумма") from err
+        raise OrderError("order.bad_amount") from err
     if user.is_banned:
-        raise OrderError("Аккаунт заблокирован")
+        raise OrderError("err.account_blocked")
 
     # Supplier round-trips first (they can take seconds: nervixy is throttled), the database only afterwards —
     # so a DB connection is held for milliseconds, not while waiting on the network. `s` stays untouched until then.
@@ -140,27 +152,27 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
         rates = await nervixy.rates()
     except (NervixyError, NervixyTransportError) as err:
         log.warning("rates unavailable: %s", err)
-        raise OrderError("Сервис пополнения временно недоступен, попробуйте через пару минут") from err
+        raise OrderError("order.service_unavailable") from err
     if amount < lo or amount > hi:
-        raise OrderError(f"Сумма должна быть от {fmt_amount(lo, currency)} до {fmt_amount(hi, currency)}")
+        raise OrderError("order.amount_range", min=fmt_amount(lo, currency), max=fmt_amount(hi, currency))
 
     try:
         valid, msg = await nervixy.check_login(steam_login)
     except NervixyError as err:
         if err.status == 400:
-            raise OrderError("Некорректный логин Steam") from err
-        raise OrderError("Не удалось проверить логин Steam, попробуйте ещё раз") from err
+            raise OrderError("order.bad_login") from err
+        raise OrderError("order.login_check_failed") from err
     except NervixyTransportError as err:
-        raise OrderError("Не удалось проверить логин Steam, попробуйте ещё раз") from err
+        raise OrderError("order.login_check_failed") from err
     if not valid:
-        raise OrderError("Этот Steam-аккаунт нельзя пополнить: проверьте логин (именно логин для входа, не никнейм)")
+        raise OrderError("order.login_cannot_topup")
 
     fx = rates[currency]
     try:
         cd, sd = discount_for(user), await nervixy.supplier_discount()
         supplier_balance = to_micro((await nervixy.account(max_age=120))["balance"])
     except (NervixyError, NervixyTransportError) as err:
-        raise OrderError("Сервис пополнения временно недоступен, попробуйте через пару минут") from err
+        raise OrderError("order.service_unavailable") from err
     nominal = amount / fx
     cost_micro = to_micro(nominal * (1 - sd / 100), up=True)
 
@@ -173,18 +185,18 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
         try:
             promo = await promos.find(s, promo_code)
             if promo.kind != "discount":
-                raise promos.PromoError("Это промокод на баланс — активируйте его отдельно, кнопкой «Применить»")
+                raise promos.PromoError("order.promo_is_bonus")
             if await promos.uses_by(s, promo.id, user.id) >= promo.per_user:
-                raise promos.PromoError("Вы уже использовали этот промокод")
+                raise promos.PromoError("promo.already_used")
         except promos.PromoError as err:
-            raise OrderError(str(err)) from err
+            raise OrderError(err.key, **err.params) from err
         cd = promos.combined(cd, sd, promo.value)
     price_micro = to_micro(nominal * (1 - cd / 100), up=True)
     if not balance_only:
         active = (await s.execute(select(func.count()).select_from(Order).where(
             Order.user_id == user.id, Order.status == "awaiting_payment"))).scalar_one()
         if active >= settings.max_active_orders:
-            raise OrderError("Слишком много неоплаченных заказов — оплатите или отмените предыдущие")
+            raise OrderError("order.too_many_unpaid")
     balance = (await s.execute(select(User.balance_micro).where(User.id == user.id))).scalar_one()
     if balance_only and balance < price_micro:
         raise InsufficientBalance(balance, price_micro)
@@ -198,9 +210,8 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
             kb([btn("Nervixy", cb="a:nx", style=PRIMARY, icon="bank")]), key="capacity", every=900))
         max_amount = (from_micro(max(cap, 0)) / (1 - sd / 100) * fx).quantize(Decimal("1"), rounding=ROUND_FLOOR)
         if max_amount >= lo:
-            raise OrderError(f"Сейчас можем принять заказ максимум на {fmt_amount(max_amount, currency)}. "
-                             "Уменьшите сумму или попробуйте позже")
-        raise OrderError("Пополнение временно недоступно — идёт пополнение резерва. Попробуйте позже")
+            raise OrderError("order.capacity", max=fmt_amount(max_amount, currency))
+        raise OrderError("order.reserve_refill")
 
     order = Order(public_id=public_id(), user_id=user.id, steam_login=steam_login, currency=currency, amount=amount,
                   fx_rate=fx, nominal_micro=to_micro(nominal), price_micro=price_micro, cost_micro=cost_micro,
@@ -213,25 +224,25 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
         try:
             await promos.take(s, promo, user.id, order.id)  # atomically: the last free use can't go to two orders
         except promos.PromoError as err:
-            raise OrderError(str(err)) from err
+            raise OrderError(err.key, **err.params) from err
 
     if balance >= price_micro - (0 if balance_only else PAY_TOLERANCE_MICRO) and balance > 0:
         if not await try_charge(s, order):  # a parallel order spent the balance in the meantime
             if balance_only:
                 now = (await s.execute(select(User.balance_micro).where(User.id == user.id))).scalar_one()
                 raise InsufficientBalance(now, price_micro)
-            raise OrderError("Не удалось списать баланс, попробуйте ещё раз")
+            raise OrderError("order.charge_failed")
         order.method = "balance"
         return order
 
     m = get_method(method_code or "")
     if not m or not m.enabled:
-        raise OrderError("Выберите способ оплаты")
+        raise OrderError("err.method")
     try:
         await create_invoice(s, m=m, user_id=user.id, order_id=order.id, usd_micro=price_micro - max(balance, 0),
                              comment=order.public_id)
     except PaymentUnavailable as err:
-        raise OrderError(f"Оплата в {m.title} временно недоступна, выберите другую монету") from err
+        raise OrderError("order.coin_unavailable", coin=m.title) from err
     return order
 
 
@@ -272,7 +283,7 @@ async def refund(s: AsyncSession, order: Order, reason: str, status: str = "reje
         await promos.give_back(s, order.id)  # the top-up didn't happen: the client keeps their promo use
     if order.charged_micro > 0:
         await change_balance(s, order.user_id, order.charged_micro, "refund", order_id=order.id,
-                             comment=f"Возврат по заказу {order.public_id}")
+                             comment=order.public_id)  # the kind says "refund"
         order.charged_micro = 0
     order.status, order.error, order.finished_at, order.next_check_at = status, reason, utcnow(), None
 
@@ -429,11 +440,12 @@ async def _on_submit_error(order_id: int, err: NervixyError) -> None:
             amt, price = fmt_amount(o.amount, o.currency), usd_str(o.price_micro)
             await outbox.to_admins(s, f"{e('fail')} Заказ <code>{pid}</code> отклонён nervixy: {esc(err.message)}\n"
                                       f"{e('refund')} ${price} возвращены клиенту на баланс.")
-            await outbox.to_user(s, o.user_id, f"{e('fail')} <b>Не удалось пополнить Steam</b>\n"
-                                 + panel(f"Аккаунт <code>{esc(login)}</code> · {amt}", f"Причина: {esc(err.message)}")
-                                 + f"\n{e('refund')} <b>${price}</b> вернулись на баланс сайта — можно оформить заказ заново.",
-                                 kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
-                                    [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
+            lang = await i18n.lang_of_user(s, o.user_id)
+            await outbox.to_user(s, o.user_id, f"{e('fail')} {t('notify.failed.title', lang)}\n"
+                                 + panel(t("notify.account_line", lang, login=esc(login), amount=amt),
+                                         t("notify.reason", lang, reason=esc(err.message)))
+                                 + f"\n{e('refund')} {t('notify.refunded_retry', lang, price=price)}",
+                                 customer_kb(lang, again=True))
     if requeue:
         if err.insufficient_funds:
             background(notify_admins(f"{e('queue')} <b>Nervixy: не хватает средств</b>\n"
@@ -489,24 +501,26 @@ async def apply_status(order_id: int, st: str) -> None:
             spent = (o.finished_at - (o.submitted_at or o.finished_at)).total_seconds()
             card = new_order_card(o, await s.get(User, o.user_id), state=f"✅ <b>Выполнено</b> за {took(spent)}")
             amt = fmt_amount(o.amount, o.currency)
-            await outbox.to_user(s, o.user_id, f"{e('ok')} <b>Готово!</b>\n"
-                                 + panel(f"Steam <code>{esc(o.steam_login)}</code> пополнен на <b>{amt}</b>.")
-                                 + f"\nПриятных покупок! {e('gift')}\n<i>Заказ {o.public_id}</i>",
-                                 kb([btn("Пополнить ещё", url=site("/"), style=PRIMARY, icon="rocket")],
-                                    [btn("Мои заказы", cb="m:orders", icon="orders")]))
+            lang = await i18n.lang_of_user(s, o.user_id)
+            await outbox.to_user(s, o.user_id, f"{e('ok')} {t('notify.done.title', lang)}\n"
+                                 + panel(t("notify.done.body", lang, login=esc(o.steam_login), amount=amt))
+                                 + f"\n{t('notify.done.enjoy', lang)} {e('gift')}\n{t('notify.order_ref', lang, order=o.public_id)}",
+                                 kb([btn(t("btn.topup_again", lang), url=site("/"), style=PRIMARY, icon="rocket")],
+                                    [btn(t("btn.my_orders", lang), cb="m:orders", icon="orders")]))
             notify = ("ok", o.public_id, amt, usd_str(o.price_micro - (o.nervixy_paid_micro or o.cost_micro)), msgs, card)
         elif st == "rejected":
-            await refund(s, o, "отклонено поставщиком")
+            await refund(s, o, "reason.rejected_by_supplier")
             await queue_webhook(s, o.user_id, "order.rejected", public_order(o))
             card = new_order_card(o, await s.get(User, o.user_id),
                                   state=f"❌ <b>Отклонён поставщиком</b> · ↩️ ${usd_str(o.price_micro)} "
                                         "вернулись клиенту на баланс")
             price = usd_str(o.price_micro)
-            await outbox.to_user(s, o.user_id, f"{e('fail')} <b>Поставщик отклонил пополнение</b>\n"
-                                 + panel(f"Аккаунт <code>{esc(o.steam_login)}</code> · {fmt_amount(o.amount, o.currency)}")
-                                 + f"\n{e('refund')} <b>${price}</b> вернулись на баланс сайта — можно оформить заказ заново.",
-                                 kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
-                                    [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
+            lang = await i18n.lang_of_user(s, o.user_id)
+            await outbox.to_user(s, o.user_id, f"{e('fail')} {t('notify.declined.title', lang)}\n"
+                                 + panel(t("notify.account_line", lang, login=esc(o.steam_login),
+                                           amount=fmt_amount(o.amount, o.currency)))
+                                 + f"\n{e('refund')} {t('notify.refunded_retry', lang, price=price)}",
+                                 customer_kb(lang, again=True))
             notify = ("rej", o.public_id, price, msgs, card)
         else:
             age = (utcnow() - (o.submitted_at or utcnow())).total_seconds()
@@ -744,13 +758,14 @@ async def admin_refund(order_id: int) -> str:
         o = await s.get(Order, order_id)
         if not o or not await move_status(s, order_id, ("uncertain", "queued", "processing"), "rejected"):
             return "Заказ уже не в ожидании решения"
-        await refund(s, o, "возврат администратором", status="rejected")
+        await refund(s, o, "reason.refunded_by_admin", status="rejected")
         await queue_webhook(s, o.user_id, "order.rejected", public_order(o))
-        await outbox.to_user(s, o.user_id, f"{e('refund')} <b>Заказ отменён</b>\n"
-                             + panel(f"Пополнение Steam <code>{esc(o.steam_login)}</code> ({fmt_amount(o.amount, o.currency)}) не выполнено.",
-                                     f"<b>${usd_str(o.price_micro)}</b> вернулись на баланс сайта."),
-                             kb([btn("Оформить заново", url=site("/"), style=PRIMARY, icon="rocket")],
-                                [btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None]))
+        lang = await i18n.lang_of_user(s, o.user_id)
+        await outbox.to_user(s, o.user_id, f"{e('refund')} {t('notify.cancelled.title', lang)}\n"
+                             + panel(t("notify.cancelled.body", lang, login=esc(o.steam_login),
+                                       amount=fmt_amount(o.amount, o.currency)),
+                                     t("notify.cancelled.refund", lang, price=usd_str(o.price_micro))),
+                             customer_kb(lang, again=True))
     return "Возвращено на баланс клиента"
 
 

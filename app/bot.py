@@ -17,7 +17,8 @@ from aiogram.types import BotCommand, CallbackQuery, FSInputFile, MenuButtonWebA
 from sqlalchemy import func, select
 
 from . import fail2ban as f2b
-from . import i18n, notify, tgui, waitlist
+from . import i18n, notify, outbox, tgui, waitlist
+from .i18n import t
 from .auth import code_choices, upsert_tg_user
 from .config import settings
 from .db import session_scope
@@ -40,11 +41,8 @@ BANNER = Path(__file__).parent / "web" / "assets" / "img" / "bot-banner.jpg"
 CAPTION_MAX = 1024  # Telegram's limit for a photo caption; a longer screen goes out as plain text
 _banner_id: str | None = None  # the banner's file_id after the first upload: later sends don't re-upload it
 
-STATUS = {"awaiting_payment": ("wait", "ждёт оплату"), "paid": ("card", "оплачен"), "submitting": ("wait", "пополняется"),
-          "queued": ("queue", "в очереди"), "uncertain": ("wait", "проверяется"), "processing": ("wait", "пополняется"),
-          "delivered": ("ok", "готово"), "rejected": ("fail", "возврат на баланс"), "expired": ("clock", "истёк"),
-          "cancelled": ("cancel", "отменён")}
-KIND = {"deposit": "Пополнение", "order": "Заказ", "refund": "Возврат", "adjust": "Корректировка", "promo": "Промокод"}
+STATUS_ICON = {"awaiting_payment": "wait", "paid": "card", "submitting": "wait", "queued": "queue", "uncertain": "wait",
+               "processing": "wait", "delivered": "ok", "rejected": "fail", "expired": "clock", "cancelled": "cancel"}
 KIND_ICON = {"deposit": "money", "order": "steam", "refund": "refund", "adjust": "swap", "promo": "gift"}
 
 
@@ -65,8 +63,8 @@ def short_ua(ua: str | None) -> str:
     ua = ua or ""
     os_ = next((n for k, n in (("Android", "Android"), ("iPhone", "iPhone"), ("iPad", "iPad"), ("Windows", "Windows"),
                                ("Mac OS", "macOS"), ("Linux", "Linux")) if k in ua), "")
-    br = next((n for k, n in (("YaBrowser", "Яндекс Браузер"), ("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox", "Firefox"),
-                              ("Chrome", "Chrome"), ("Safari", "Safari")) if k in ua), "браузер")
+    br = next((n for k, n in (("YaBrowser", t("bot.yandex_browser")), ("Edg/", "Edge"), ("OPR/", "Opera"),
+                              ("Firefox", "Firefox"), ("Chrome", "Chrome"), ("Safari", "Safari")) if k in ua), t("bot.browser"))
     return f"{br}{' · ' + os_ if os_ else ''}"
 
 
@@ -76,31 +74,31 @@ async def _user(tg_id: int) -> User | None:
 
 
 def back(to: str = "m:home") -> list:
-    return [btn("Назад", cb=to, icon="back")]
+    return [btn(t("btn.back"), cb=to, icon="back")]
 
 
 # ------------------------------------------------------------------ customer screens
 
 def _not_logged_in(hint: str = "") -> tuple[str, object]:
-    return (join(title("lock", "Вы ещё не входили на сайт"), panel(hint) if hint else ""),
-            kb([btn("Открыть сайт", url=site("/"), style=PRIMARY, icon="rocket")], back()))
+    return (join(title("lock", t("bot.not_signed_in")), panel(hint) if hint else ""),
+            kb([btn(t("btn.open_site"), url=site("/"), style=PRIMARY, icon="rocket")], back()))
 
 
 async def screen_home(tg_id: int) -> tuple[str, object]:
     u = await _user(tg_id)
-    text = join(f"{e('logo')} <b>SupplierHub</b> — пополнение Steam криптой",
-                f"Привет, {esc(u.first_name or u.display_name)}! {e('hello')}" if u else "",
-                panel(f"{e('bolt')} Автоматически, сразу после подтверждения платежа",
-                      f"{e('percent')} Скидка {discount_for(u)}%",
-                      f"{e('shield')} Если что-то пошло не так — деньги вернутся на баланс"),
-                "" if u else "Войдите на сайте через Telegram — и здесь появятся ваши заказы и баланс.")
+    text = join(f"{e('logo')} {t('bot.home.title')}",
+                f"{t('bot.home.hello', name=esc(u.first_name or u.display_name))} {e('hello')}" if u else "",
+                panel(f"{e('bolt')} {t('bot.home.auto')}",
+                      f"{e('percent')} {t('bot.home.discount', pct=discount_for(u))}",
+                      f"{e('shield')} {t('bot.home.safe')}"),
+                "" if u else t("bot.home.signin"))
     # the balance lives on its button (once), not repeated in the text above it
-    bal = f"Баланс · ${usd_str(u.balance_micro)}" if u else "Баланс"
+    bal = t("btn.balance_amount", amount=usd_str(u.balance_micro)) if u else t("btn.balance")
     rows = [
-        [btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")],
-        [btn(bal, cb="m:bal", style=SUCCESS, icon="money"), btn("Мои заказы", cb="m:orders", icon="orders")],
-        [btn("Пополнить баланс", url=site("/#/deposit"), style=SUCCESS, icon="plus"),
-         btn("Поддержка", url=settings.support_url, icon="support") if settings.support_url else None],
+        [btn(t("btn.topup_steam"), url=site("/"), style=PRIMARY, icon="rocket")],
+        [btn(bal, cb="m:bal", style=SUCCESS, icon="money"), btn(t("btn.my_orders"), cb="m:orders", icon="orders")],
+        [btn(t("btn.add_funds"), url=site("/#/deposit"), style=SUCCESS, icon="plus"),
+         btn(t("btn.support"), url=settings.support_url, icon="support") if settings.support_url else None],
     ]
     if is_admin(tg_id):
         rows.append([btn("Админ-панель", cb="a:home", style=PRIMARY, icon="admin")])
@@ -110,17 +108,17 @@ async def screen_home(tg_id: int) -> tuple[str, object]:
 async def screen_balance(tg_id: int) -> tuple[str, object]:
     u = await _user(tg_id)
     if not u:
-        return _not_logged_in("Нажмите «Войти» на сайте — бот пришлёт код.")
+        return _not_logged_in(t("bot.balance.signin_hint"))
     async with session_scope() as s:
         rows = (await s.execute(select(LedgerEntry).where(LedgerEntry.user_id == u.id)
                                 .order_by(LedgerEntry.id.desc()).limit(6))).scalars().all()
     moves = [f"{e(KIND_ICON.get(r.kind, 'coin'))} <b>{'+' if r.delta_micro > 0 else '−'}${usd_str(abs(r.delta_micro))}</b>"
-             f" · {KIND.get(r.kind, r.kind)} · {r.created_at + timedelta(hours=3):%d.%m %H:%M}" for r in rows]
-    text = join(title("money", f"Баланс: ${usd_str(u.balance_micro)}"),
-                panel(*moves) if moves else panel("Движений по балансу пока нет."),
-                "<i>Баланс автоматически оплачивает следующие заказы.</i>" if moves else "")
-    return text, kb([btn("Пополнить баланс", url=site("/#/deposit"), style=SUCCESS, icon="plus")],
-                    [btn("Обновить", cb="m:bal", icon="refresh"), *back()])
+             f" · {t('kind.' + r.kind)} · {r.created_at + timedelta(hours=3):%d.%m %H:%M}" for r in rows]
+    text = join(title("money", t("bot.balance.title", amount=usd_str(u.balance_micro))),
+                panel(*moves) if moves else panel(t("bot.balance.empty")),
+                t("bot.balance.note") if moves else "")
+    return text, kb([btn(t("btn.add_funds"), url=site("/#/deposit"), style=SUCCESS, icon="plus")],
+                    [btn(t("btn.refresh"), cb="m:bal", icon="refresh"), *back()])
 
 
 async def screen_orders(tg_id: int) -> tuple[str, object]:
@@ -131,11 +129,11 @@ async def screen_orders(tg_id: int) -> tuple[str, object]:
         rows = (await s.execute(select(Order).where(Order.user_id == u.id).order_by(Order.id.desc()).limit(8))).scalars().all()
     lines = []
     for o in rows:
-        ek, label = STATUS.get(o.status, ("question", o.status))
-        lines.append(f"{e(ek)} <b>{fmt_amount(o.amount, o.currency)}</b> → <code>{esc(o.steam_login)}</code> · {label}")
-    text = join(title("orders", "Мои заказы"), panel(*lines) if lines else panel("Заказов пока нет."))
-    return text, kb([btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")],
-                    [btn("Обновить", cb="m:orders", icon="refresh"), *back()])
+        lines.append(f"{e(STATUS_ICON.get(o.status, 'question'))} <b>{fmt_amount(o.amount, o.currency)}</b> → "
+                     f"<code>{esc(o.steam_login)}</code> · {t('status.' + o.status)}")
+    text = join(title("orders", t("bot.orders.title")), panel(*lines) if lines else panel(t("bot.orders.empty")))
+    return text, kb([btn(t("btn.topup_steam"), url=site("/"), style=PRIMARY, icon="rocket")],
+                    [btn(t("btn.refresh"), cb="m:orders", icon="refresh"), *back()])
 
 
 # ------------------------------------------------------------------ admin screens
@@ -239,8 +237,8 @@ async def screen_work() -> tuple[str, object]:
     text = join(
         title("work", "Проблемы и очередь"),
         panel(f"{e('warn')} <b>Требуют внимания</b>",
-              *(f"{e(STATUS[o.status][0])} <code>{o.public_id}</code> · {fmt_amount(o.amount, o.currency)} · "
-                f"{STATUS[o.status][1]}" for o in problem)) if problem else "",
+              *(f"{e(STATUS_ICON[o.status])} <code>{o.public_id}</code> · {fmt_amount(o.amount, o.currency)} · "
+                f"{t('status.' + o.status, 'ru')}" for o in problem)) if problem else "",
         panel(f"{e('wait')} <b>Пополняются сейчас: {len(active)}</b>",
               *(f"<code>{o.public_id}</code> · {fmt_amount(o.amount, o.currency)} → <code>{esc(o.steam_login)}</code>"
                 for o in active), expandable=len(active) > 4),
@@ -257,7 +255,7 @@ async def screen_last() -> tuple[str, object]:
                                 .order_by(Order.id.desc()).limit(10))).all()
     lines = []
     for o, u in rows:
-        ek, label = STATUS.get(o.status, ("question", o.status))
+        ek, label = STATUS_ICON.get(o.status, "question"), t("status." + o.status, "ru")
         margin = o.price_micro - (o.nervixy_paid_micro or o.cost_micro)
         lines.append(f"{e(ek)} <b>{fmt_amount(o.amount, o.currency)}</b> → <code>{esc(o.steam_login)}</code>\n"
                      f"      {esc(u.display_name)} · {label}"
@@ -382,15 +380,15 @@ async def start_plain(message: Message):
 async def join_waitlist(message: Message):
     """"Узнать о запуске" on the site's FunPay / Playerok card: the person goes on the list for the launch news."""
     new = await waitlist.join(message.from_user.id, message.from_user.username)
-    text = join(title("bell", "Вы в списке!" if new else "Вы уже в списке"),
-                panel("Напишу сюда, как только выйдет плагин для FunPay и Playerok."))
-    await show(message, text, kb([btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")],
-                                 [btn("Меню", cb="m:home", icon="logo")]), edit=False, banner=True)
+    text = join(title("bell", t("bot.waitlist.joined") if new else t("bot.waitlist.already")),
+                panel(t("bot.waitlist.body")))
+    await show(message, text, kb([btn(t("btn.topup_steam"), url=site("/"), style=PRIMARY, icon="rocket")],
+                                 [btn(t("btn.menu"), cb="m:home", icon="logo")]), edit=False, banner=True)
 
 
 @router.message(Command("language"))
 async def cmd_language(message: Message):
-    await message.answer("Язык / Language", reply_markup=kb([btn("Русский", cb="lang:ru"), btn("English", cb="lang:en")]))
+    await message.answer(t("bot.lang.choose"), reply_markup=kb([btn("Русский", cb="lang:ru"), btn("English", cb="lang:en")]))
 
 
 @router.callback_query(F.data.startswith("lang:"))
@@ -401,7 +399,7 @@ async def cb_language(cb: CallbackQuery):
     await i18n.choose(cb.from_user.id, lang)
     i18n.current.set(lang)
     await set_menu_button(cb.bot, cb.from_user.id, lang)
-    await cb.answer("Готово")
+    await cb.answer(t("bot.done"))
     await show(cb.message, *await screen_home(cb.from_user.id), edit=True, banner=True)
 
 
@@ -435,7 +433,7 @@ async def cb_screen(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("a:"))
 async def cb_admin_screen(cb: CallbackQuery):
     if not is_admin(cb.from_user.id):
-        return await cb.answer("Нет доступа", show_alert=True)
+        return await cb.answer(t("bot.no_access"), show_alert=True)
     if cb.data == "a:help":
         await show(cb.message, *screen_help(), edit=True)
     elif cb.data in ADMIN_SCREENS:
@@ -449,16 +447,16 @@ async def handle_login(message: Message, tok: str):
     async with session_scope() as s:
         req = await s.get(LoginRequest, tok)
         if not req or req.status != "pending" or req.expires_at < utcnow():
-            await message.answer(f"{e('clock')} Ссылка для входа устарела. Нажмите «Войти» на сайте ещё раз.")
+            await message.answer(f"{e('clock')} {t('bot.login.expired')}")
             return
         choices, ua, ip = code_choices(req.code), req.user_agent, req.ip
     # all code buttons look the same on purpose: the colour must not hint the right one
     markup = kb([btn(c, cb=f"lc:{tok}:{c}") for c in choices],
-                [btn("Это не я", cb=f"lx:{tok}", style=DANGER, icon="cancel")])
-    await show(message, join(title("lock", "Вход на сайт"),
-                             "Нажмите код, который сейчас показан на сайте.",
+                [btn(t("btn.not_me"), cb=f"lx:{tok}", style=DANGER, icon="cancel")])
+    await show(message, join(title("lock", t("bot.login.title")),
+                             t("bot.login.tap_code"),
                              panel(f"{e('user')} {esc(short_ua(ua))}", f"{e('net')} IP {esc(ip)}"),
-                             "Если вы не входили — нажмите «Это не я»."), markup, edit=False)
+                             t("bot.login.not_you")), markup, edit=False)
 
 
 @router.callback_query(F.data.startswith("lc:"))
@@ -468,19 +466,19 @@ async def login_confirm(cb: CallbackQuery):
     async with session_scope() as s:
         req = await s.get(LoginRequest, tok)
         if not req or req.status != "pending" or req.expires_at < utcnow():
-            await cb.message.edit_text(f"{e('clock')} Ссылка для входа устарела. Нажмите «Войти» на сайте ещё раз.")
+            await cb.message.edit_text(f"{e('clock')} {t('bot.login.expired')}")
             return await cb.answer()
         if code != req.code:
             req.status = "cancelled"
-            await cb.message.edit_text(f"{e('fail')} Код не совпал — вход отменён. Попробуйте ещё раз на сайте.")
+            await cb.message.edit_text(f"{e('fail')} {t('bot.login.wrong_code')}")
             return await cb.answer()
         u = cb.from_user
         user = await upsert_tg_user(s, u.id, u.username, u.first_name, u.last_name, u.language_code)
         req.status, req.user_id, req.link_key_hash = "confirmed", user.id, sha256(link_key)
-    await show(cb.message, join(title("ok", "Вход подтверждён"), panel("Возвращайтесь на сайт — вы уже вошли.")),
-               kb([btn("Вернуться на сайт", url=site(f"/auth/tg?t={tok}&k={link_key}"), style=SUCCESS, icon="rocket")],
-                  [btn("Меню", cb="m:home", icon="logo")]), edit=True)
-    await cb.answer("Готово")
+    await show(cb.message, join(title("ok", t("bot.login.confirmed")), panel(t("bot.login.go_back"))),
+               kb([btn(t("btn.back_to_site"), url=site(f"/auth/tg?t={tok}&k={link_key}"), style=SUCCESS, icon="rocket")],
+                  [btn(t("btn.menu"), cb="m:home", icon="logo")]), edit=True)
+    await cb.answer(t("bot.done"))
 
 
 @router.callback_query(F.data.startswith("lx:"))
@@ -490,7 +488,7 @@ async def login_cancel(cb: CallbackQuery):
         req = await s.get(LoginRequest, tok)
         if req and req.status == "pending":
             req.status = "cancelled"
-    await cb.message.edit_text(f"{e('shield')} Вход отменён. Никто не получил доступ к вашему аккаунту.")
+    await cb.message.edit_text(f"{e('shield')} {t('bot.login.cancelled')}")
     await cb.answer()
 
 
@@ -523,15 +521,18 @@ async def cmd_bal(message: Message, command: CommandObject):
             delta = to_micro(D(parts[1]))
         except (InvalidOperation, ValueError):
             return await message.answer("Сумма в USD, например +5 или -2.5")
-        comment = parts[2] if len(parts) > 2 else "корректировка админом"
-        new = await change_balance(s, u.id, delta, "adjust", comment=comment, require_funds=delta < 0)
-        name, uid = u.display_name, u.id
+        comment = parts[2] if len(parts) > 2 else ""
+        new = await change_balance(s, u.id, delta, "adjust", comment=comment or None, require_funds=delta < 0)
+        name = u.display_name
+        if new is not None:
+            lang = i18n.user_lang(u)
+            await outbox.to_user(s, u.id, join(
+                f"{e('money')} {t('notify.balance_changed', lang, delta=('+' if delta > 0 else '−') + '$' + usd_str(abs(delta)))}",
+                esc(comment), "", t("notify.balance_now", lang, balance=usd_str(new))),
+                kb([btn(t("btn.topup_steam", lang), url=site("/"), style=PRIMARY, icon="rocket")]))
     if new is None:  # answer outside the transaction: it holds the database's write turn until it ends
         return await message.answer(f"{e('warn')} Недостаточно средств на балансе клиента")
     await message.answer(f"{e('ok')} {esc(name)}: баланс теперь <b>${usd_str(new)}</b>")
-    await notify.notify_user(uid, f"{e('money')} <b>Баланс изменён</b>: {'+' if delta > 0 else '−'}${usd_str(abs(delta))}\n"
-                                  f"{esc(comment)}\n\nТеперь на балансе: <b>${usd_str(new)}</b>",
-                             kb([btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")]))
 
 
 @router.message(Command("disc"))
@@ -615,18 +616,17 @@ async def cmd_promo(message: Message, command: CommandObject):
                                                      "<code>/promo off SALE</code> — выключить")]))
     # a client
     if not args:
-        return await message.answer("Отправьте <code>/promo КОД</code> — бонус зачислится на баланс. "
-                                    "Промокод на скидку вводится на сайте при оформлении заказа.")
+        return await message.answer(t("bot.promo.help"))
     u = await _user(uid)
     if not u:
-        return await message.answer(f"{e('lock')} Сначала войдите на сайте через Telegram — потом активируйте промокод.")
+        return await message.answer(f"{e('lock')} {t('bot.promo.signin_first')}")
     try:
         async with session_scope() as s:
             p, new = await promos.redeem_bonus(s, u.id, args[0])
     except promos.PromoError as err:
         return await message.answer(f"{e('warn')} {err}")
-    await message.answer(f"{e('gift')} Промокод <code>{p.code}</code>: {promos.label(p)}\n"
-                         f"{e('money')} На балансе: <b>${usd_str(new)}</b>")
+    await message.answer(f"{e('gift')} {t('bot.promo.redeemed', code=p.code, label=promos.label(p))}\n"
+                         f"{e('money')} {t('bot.promo.balance', balance=usd_str(new))}")
 
 
 @router.message(Command("waitlist"))
@@ -742,7 +742,7 @@ async def cmd_emoji(message: Message):
 @router.callback_query(F.data.startswith("ad:"))
 async def admin_order_action(cb: CallbackQuery):
     if not is_admin(cb.from_user.id):
-        return await cb.answer("Нет доступа", show_alert=True)
+        return await cb.answer(t("bot.no_access"), show_alert=True)
     _, action, oid = cb.data.split(":")
     msg = await (admin_retry(int(oid)) if action == "retry" else admin_refund(int(oid)))
     await cb.message.edit_reply_markup(reply_markup=None)
@@ -753,7 +753,7 @@ async def admin_order_action(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("cl:"))
 async def admin_claim_action(cb: CallbackQuery):
     if not is_admin(cb.from_user.id):
-        return await cb.answer("Нет доступа", show_alert=True)
+        return await cb.answer(t("bot.no_access"), show_alert=True)
     _, action, cid = cb.data.split(":")
     msg = await monitor_mod.approve_claim(int(cid), action == "ok")
     await cb.message.edit_reply_markup(reply_markup=None)
@@ -765,7 +765,7 @@ async def admin_claim_action(cb: CallbackQuery):
 async def admin_transfer_action(cb: CallbackQuery):
     """A payment the second provider didn't confirm: the admin checked the explorer and decides."""
     if not is_admin(cb.from_user.id):
-        return await cb.answer("Нет доступа", show_alert=True)
+        return await cb.answer(t("bot.no_access"), show_alert=True)
     _, action, tid = cb.data.split(":")
     msg = await monitor_mod.release_transfer(int(tid), action == "ok")
     await cb.message.edit_reply_markup(reply_markup=None)
@@ -804,7 +804,7 @@ async def set_menu_button(bot: Bot, chat_id: int | None = None, lang: str = "ru"
     url = i18n.with_lang(settings.base_url.rstrip("/") + "/", lang) if chat_id else settings.base_url.rstrip("/") + "/"
     with suppress(Exception):  # a cosmetic call: never worth failing the bot start or a button press over
         await bot.set_chat_menu_button(chat_id=chat_id, menu_button=MenuButtonWebApp(
-            text="Open" if lang == "en" else "Открыть", web_app=WebAppInfo(url=url)))
+            text=t("btn.open_app", lang), web_app=WebAppInfo(url=url)))
 
 
 async def run_bot() -> None:
@@ -820,10 +820,9 @@ async def run_bot() -> None:
     notify.set_bot(bot)
     log.info("bot @%s started", bot_username)
     await load_pack(bot)
-    await bot.set_my_commands([BotCommand(command="start", description="Меню"),
-                               BotCommand(command="language", description="Язык / Language")])
-    await bot.set_my_commands([BotCommand(command="start", description="Menu"),
-                               BotCommand(command="language", description="Language / Язык")], language_code="en")
+    for lang, code in (("ru", None), ("en", "en")):
+        await bot.set_my_commands([BotCommand(command="start", description=t("cmd.start", lang)),
+                                   BotCommand(command="language", description=t("cmd.language", lang))], language_code=code)
     await set_menu_button(bot)
     if _dp is None:  # once per process: run_bot restarts after a crash, and a router can't be attached twice
         _dp = Dispatcher()

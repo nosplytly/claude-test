@@ -19,6 +19,8 @@ from typing import Annotated, Literal
 from fastapi import Path, Query
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator
 
+from .i18n import Problem, t
+
 STEAM_LOGIN = r"^[A-Za-z0-9_.\-]{3,64}$"
 PUBLIC_ID = r"^[A-Z0-9]{4,32}$"  # SH… orders, DP… deposits (app.utils.public_id)
 EXTERNAL_ID = r"^[A-Za-z0-9_.:\-]{1,64}$"
@@ -40,7 +42,7 @@ class Foreign(BaseModel):
 
 def _money_in(v):
     if isinstance(v, bool):
-        raise ValueError("сумма — число, а не true/false")
+        raise Invalid("err.amount_bool")
     if isinstance(v, float):
         return repr(v)  # 0.1 stays 0.1, not 0.1000000000000000055511151231257827
     return v
@@ -126,13 +128,13 @@ class ApiSettingsIn(In):
     def _ips(cls, v: str) -> str:
         items = [x.strip() for x in v.replace(";", ",").replace(" ", ",").split(",") if x.strip()]
         if len(items) > 20:
-            raise ValueError("Не больше 20 IP-адресов")
+            raise Invalid("err.too_many_ips")
         out = []
         for x in items:
             try:
                 out.append(str(ipaddress.ip_address(x)))
             except ValueError:
-                raise ValueError(f"Некорректный IP: {x}") from None
+                raise Invalid("err.bad_ip", ip=x) from None
         return ",".join(dict.fromkeys(out))
 
 
@@ -186,30 +188,30 @@ class NervixyEvent(Foreign):
 
 # friendly words for the site when a field doesn't pass (the partner API gets the field names and reasons instead)
 FIELD_MESSAGES = {
-    "login": "Логин Steam: 3–64 символа — латиница, цифры, _ - .",
-    "steam_login": "Логин Steam: 3–64 символа — латиница, цифры, _ - .",
-    "amount": "Некорректная сумма",
-    "amount_usd": "Некорректная сумма",
-    "currency": "Неизвестная валюта",
-    "method": "Выберите способ оплаты",
-    "code": "Такого промокода нет",
-    "promo": "Такого промокода нет",
-    "txid": "Это не похоже на хэш транзакции",
-    "init_data": "Не удалось подтвердить вход через Telegram — откройте приложение из бота заново",
-    "allowed_ips": "Слишком длинный список IP",
-    "webhook_url": "Слишком длинный адрес",
+    "login": "err.login_format", "steam_login": "err.login_format",
+    "amount": "err.amount", "amount_usd": "err.amount",
+    "currency": "err.currency", "method": "err.method",
+    "code": "promo.not_found", "promo": "promo.not_found",
+    "txid": "err.txid", "init_data": "err.webapp",
+    "allowed_ips": "err.ips_too_long", "webhook_url": "err.webhook_url_long",
 }
 
 
+class Invalid(Problem, ValueError):
+    """A validator's own words (a key), shown to the customer in their language."""
+
+
 def site_message(errors: list[dict]) -> str:
-    """One line for the customer: our own words from a validator, else the field's, else a general one."""
+    """One line for the customer, in the request's language: our own words from a validator, else the field's,
+    else a general one."""
     for e in errors:
-        if e.get("type") == "value_error":
-            return str(e.get("msg", "")).removeprefix("Value error, ")
+        own = (e.get("ctx") or {}).get("error")
+        if isinstance(own, Problem):
+            return own.text()
         if e.get("type") == "extra_forbidden":
-            return f"Лишнее поле: {e['loc'][-1]}"
+            return t("err.extra_field", field=e["loc"][-1])
     for e in errors:
         loc = [x for x in e.get("loc", []) if isinstance(x, str) and x not in ("body", "query", "path")]
         if loc and loc[-1] in FIELD_MESSAGES:
-            return FIELD_MESSAGES[loc[-1]]
-    return "Проверьте введённые данные"
+            return t(FIELD_MESSAGES[loc[-1]])
+    return t("err.check_input")

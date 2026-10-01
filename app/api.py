@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import avatars, events, i18n, waitlist
+from .i18n import t
 from . import bot as bot_mod
 from .auth import verify_webapp
 from .auth import (LOGIN_COOKIE, LOGIN_TTL, SESSION_COOKIE, SESSION_TTL, client_ip, create_session, current_user,
@@ -29,7 +30,7 @@ from .models import ApiKey, LedgerEntry
 from .money import plain, usd_str
 from .nervixy import CURRENCIES, NervixyError, NervixyTransportError, nervixy
 from . import promos
-from .orders import (CUR_SIGN, OrderError, apply_status, check_status, create_order, discount_for, limits,
+from .orders import (CUR_SIGN, OrderError, apply_status, check_status, create_order, discount_for, limits, reason_text,
                      move_status, order_transfers)
 from .payments.invoices import effective_price
 from .utils import token
@@ -102,7 +103,7 @@ async def order_view(s: AsyncSession, o: Order, full: bool = True) -> dict:
     v = {"id": o.public_id, "status": o.status, "steam_login": o.steam_login, "currency": o.currency,
          "sign": CUR_SIGN.get(o.currency, o.currency), "amount": plain(o.amount), "pay_fiat": plain(pay_fiat),
          "price_usd": usd_str(o.price_micro), "method": o.method, "created_at": iso(o.created_at),
-         "finished_at": iso(o.finished_at), "error": o.error if o.status == "rejected" else None,
+         "finished_at": iso(o.finished_at), "error": reason_text(o.error) if o.status == "rejected" else None,
          "stage": STAGE.get(o.status, "pay"), "invoice": None, "payment": None}
     if not full:
         return v
@@ -118,11 +119,11 @@ async def order_view(s: AsyncSession, o: Order, full: bool = True) -> dict:
                         "qr": f"/api/invoices/{inv.id}/qr.svg?u={inv.units}", "confirmations": m.confirmations}
     trs = await order_transfers(s, o.id)
     if trs:
-        t = trs[-1]
-        m = METHODS[t.method]
-        v["payment"] = {"amount": plain(t.amount), "coin": m.coin, "confirmations": t.confirmations,
-                        "required": m.confirmations, "final": t.final, "tx_url": m.tx_url(t.txid),
-                        "credited": t.status == "credited"}
+        last = trs[-1]
+        m = METHODS[last.method]
+        v["payment"] = {"amount": plain(last.amount), "coin": m.coin, "confirmations": last.confirmations,
+                        "required": m.confirmations, "final": last.final, "tx_url": m.tx_url(last.txid),
+                        "credited": last.status == "credited"}
         if o.status == "awaiting_payment" and any(x.status == "matched" for x in trs):
             v["stage"] = "confirming"
     return v
@@ -171,11 +172,11 @@ async def api_check_login(body: LoginCheckIn, request: Request):
         valid, msg = await nervixy.check_login(login)
     except NervixyError as e:
         if e.status == 400:
-            return {"valid": False, "message": "Некорректный логин"}
-        raise HTTPException(503, "Проверка временно недоступна") from e
+            return {"valid": False, "message": t("err.steam_invalid_login")}
+        raise HTTPException(503, t("err.steam_check_unavailable")) from e
     except NervixyTransportError as e:
-        raise HTTPException(503, "Проверка временно недоступна") from e
-    return {"valid": valid, "message": None if valid else "Аккаунт не найден или его нельзя пополнить"}
+        raise HTTPException(503, t("err.steam_check_unavailable")) from e
+    return {"valid": valid, "message": None if valid else t("err.steam_not_found")}
 
 
 # ------------------------------------------------------------------ auth
@@ -184,7 +185,7 @@ async def api_check_login(body: LoginCheckIn, request: Request):
 async def api_auth_start(request: Request, response: Response, s: AsyncSession = Depends(get_db)):
     hit(f"auth:{client_ip(request)}", 10, 60)
     if not bot_mod.bot_username:
-        raise HTTPException(503, "Вход через Telegram временно недоступен")
+        raise HTTPException(503, t("err.tg_login_unavailable"))
     req, secret = await start_login(s, client_ip(request), request.headers.get("user-agent", ""))
     await s.commit()
     set_cookie(response, LOGIN_COOKIE, f"{req.id}.{secret}", int(LOGIN_TTL.total_seconds()))
@@ -258,11 +259,11 @@ async def api_auth_webapp(body: WebAppIn, request: Request, response: Response):
     except ValidationError:
         tg = None
     if not tg:
-        raise HTTPException(401, "Не удалось подтвердить вход через Telegram — откройте приложение из бота заново")
+        raise HTTPException(401, t("err.webapp"))
     async with session_scope() as s:
         user = await upsert_tg_user(s, tg.id, tg.username, tg.first_name, tg.last_name, tg.language_code)
         if user.is_banned:
-            raise HTTPException(403, "Аккаунт заблокирован")
+            raise HTTPException(403, t("err.account_blocked"))
         raw = await create_session(s, user, client_ip(request), request.headers.get("user-agent", ""))
         view = user_view(user)
     set_cookie(response, SESSION_COOKIE, raw, int(SESSION_TTL.total_seconds()))
@@ -294,7 +295,7 @@ async def api_promo_check(body: PromoIn, request: Request, user: User | None = D
         async with session_scope() as s:
             p = await promos.find(s, body.code)
             if user and await promos.uses_by(s, p.id, user.id) >= p.per_user:
-                raise promos.PromoError("Вы уже использовали этот промокод")
+                raise promos.PromoError("promo.already_used")
     except promos.PromoError as e:
         raise HTTPException(400, str(e)) from e
     view = {"code": p.code, "kind": p.kind, "value": plain(p.value), "label": promos.label(p)}
@@ -367,7 +368,7 @@ async def api_orders(user: User = Depends(require_user), s: AsyncSession = Depen
 async def _own_order(s: AsyncSession, user: User, pid: str) -> Order:
     o = (await s.execute(select(Order).where(Order.public_id == pid, Order.user_id == user.id))).scalar_one_or_none()
     if not o:
-        raise HTTPException(404, "Заказ не найден")
+        raise HTTPException(404, t("err.order_not_found"))
     return o
 
 
@@ -384,12 +385,12 @@ async def api_cancel(pid: OrderId, user: User = Depends(require_user)):
     async with session_scope() as s:
         o = await _own_order(s, user, pid)
         if o.status != "awaiting_payment":
-            raise HTTPException(400, "Этот заказ уже нельзя отменить")
+            raise HTTPException(400, t("err.cannot_cancel"))
         detected = (await s.execute(select(Invoice).where(Invoice.order_id == o.id, Invoice.status == "detected"))).first()
         if detected:
-            raise HTTPException(400, "Платёж уже найден — дождитесь подтверждения")
+            raise HTTPException(400, t("err.payment_found_wait"))
         if not await move_status(s, o.id, ("awaiting_payment",), "cancelled"):  # a payment won the race
-            raise HTTPException(400, "Этот заказ уже нельзя отменить")
+            raise HTTPException(400, t("err.cannot_cancel"))
         for inv in (await s.execute(select(Invoice).where(Invoice.order_id == o.id, Invoice.status == "pending"))).scalars():
             inv.status = "cancelled"  # the unique amount stays reserved: a late payment still lands on the balance
         o.status, o.finished_at = "cancelled", utcnow()
@@ -411,10 +412,9 @@ async def api_claim(pid: OrderId, body: ClaimIn, user: User = Depends(require_us
         o = await _own_order(s, user, pid)
         dup = (await s.execute(select(Claim).where(Claim.txid == txid))).scalars().first()
         if dup:
-            return {"ok": True, "message": "Эта транзакция уже на проверке"}
+            return {"ok": True, "message": t("claim.already")}
         s.add(Claim(user_id=user.id, order_id=o.id, txid=txid, status="waiting"))
-    return {"ok": True, "message": "Приняли! Найдём транзакцию в сети и зачислим после проверки — обычно это "
-                                   "занимает несколько минут. Уведомление придёт в Telegram."}
+    return {"ok": True, "message": t("claim.accepted_order")}
 
 
 @router.post("/api/deposits/{pid}/claim", dependencies=[Depends(csrf)])
@@ -424,12 +424,11 @@ async def api_deposit_claim(pid: DepositId, body: ClaimIn, user: User = Depends(
     async with session_scope() as s:
         inv = (await s.execute(select(Invoice).where(Invoice.public_id == pid, Invoice.user_id == user.id))).scalar_one_or_none()
         if not inv:
-            raise HTTPException(404, "Пополнение не найдено")
+            raise HTTPException(404, t("err.deposit_not_found"))
         if (await s.execute(select(Claim).where(Claim.txid == txid))).scalars().first():
-            return {"ok": True, "message": "Эта транзакция уже на проверке"}
+            return {"ok": True, "message": t("claim.already")}
         s.add(Claim(user_id=user.id, order_id=None, txid=txid, status="waiting"))
-    return {"ok": True, "message": "Приняли! Найдём транзакцию в сети и зачислим после проверки. "
-                                   "Уведомление придёт в Telegram."}
+    return {"ok": True, "message": t("claim.accepted_deposit")}
 
 
 @router.get("/api/invoices/{iid}/qr.svg")
@@ -463,13 +462,10 @@ async def api_create_deposit(body: DepositWebIn, user: User = Depends(require_us
 async def api_deposit(pid: DepositId, user: User = Depends(require_user), s: AsyncSession = Depends(get_db)):
     inv = (await s.execute(select(Invoice).where(Invoice.public_id == pid, Invoice.user_id == user.id))).scalar_one_or_none()
     if not inv:
-        raise HTTPException(404, "Пополнение не найдено")
+        raise HTTPException(404, t("err.deposit_not_found"))
     view = await deposit_view(s, inv)
     view["balance"] = usd_str((await s.get(User, user.id)).balance_micro)
     return view
-
-
-KIND_RU = {"deposit": "Пополнение", "order": "Заказ", "refund": "Возврат", "adjust": "Корректировка", "promo": "Промокод"}
 
 
 @router.get("/api/balance/history")
@@ -477,7 +473,7 @@ async def api_balance_history(user: User = Depends(require_user), s: AsyncSessio
     rows = (await s.execute(select(LedgerEntry, Order.public_id).outerjoin(Order, LedgerEntry.order_id == Order.id)
                             .where(LedgerEntry.user_id == user.id).order_by(LedgerEntry.id.desc()).limit(40))).all()
     return {"balance": usd_str(user.balance_micro), "items": [
-        {"kind": e.kind, "title": KIND_RU.get(e.kind, e.kind), "amount": usd_str(e.delta_micro),
+        {"kind": e.kind, "title": t("kind." + e.kind), "amount": usd_str(e.delta_micro),
          "comment": e.comment, "order_id": pid, "created_at": iso(e.created_at)} for e, pid in rows]}
 
 
@@ -532,7 +528,7 @@ async def api_settings(body: ApiSettingsIn, user: User = Depends(require_user)):
         try:
             url = await check_url(url)
         except BadWebhookUrl as e:
-            raise HTTPException(400, f"Webhook: {e}") from e
+            raise HTTPException(400, t("webhook.prefix", error=str(e))) from e
     new_secret = None
     async with session_scope() as s:
         u = await s.get(User, user.id)
@@ -560,7 +556,7 @@ async def api_webhook_test(user: User = Depends(require_user)):
     async with session_scope() as s:
         u = await s.get(User, user.id)
         if not u.webhook_url:
-            raise HTTPException(400, "Сначала укажите адрес вебхука")
+            raise HTTPException(400, t("err.webhook_url_first"))
         await queue_webhook(s, u.id, "webhook.test", {"message": "SupplierHub webhook test"})
     return {"ok": True}
 
@@ -618,7 +614,7 @@ async def api_dev_pay(pid: OrderId, user: User = Depends(require_user)):
             inv = (await s.execute(select(Invoice).where(Invoice.order_id == o.id, Invoice.status == "pending")
                                    .order_by(Invoice.id.desc()))).scalars().first()
         if not inv:
-            raise HTTPException(400, "нет открытого счёта")
+            raise HTTPException(400, t("err.no_open_invoice"))
         m = METHODS[inv.method]
         inc = Incoming(method=m.code, txid="dev" + _s.token_hex(30), idx="0", to_address=inv.address,
                        units=int(inv.units), from_address="dev-wallet", comment=inv.comment,
@@ -628,8 +624,8 @@ async def api_dev_pay(pid: OrderId, user: User = Depends(require_user)):
     async def confirm_later():
         await asyncio.sleep(6)
         async with session_scope() as s:
-            t = (await s.execute(select(Transfer).where(Transfer.txid == inc.txid))).scalar_one()
-            t.final, t.confirmations = True, m.confirmations
+            tr = (await s.execute(select(Transfer).where(Transfer.txid == inc.txid))).scalar_one()
+            tr.final, tr.confirmations = True, m.confirmations
             events.kick_after_commit(s, events.credit(m.chain))  # as the chain's poller does
     background(confirm_later(), "dev payment")
     return {"ok": True}

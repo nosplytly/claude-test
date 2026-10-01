@@ -15,6 +15,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import SessionLocal
+from .i18n import t
 from .models import LoginRequest, User, WebSession
 from .utils import sha256, token, utcnow
 
@@ -124,5 +125,5 @@ async def current_user(request: Request) -> User | None:
 
 async def require_user(user: User | None = Depends(current_user)) -> User:
     if not user:
-        raise HTTPException(401, "Войдите через Telegram")
+        raise HTTPException(401, t("err.signin"))
     return user

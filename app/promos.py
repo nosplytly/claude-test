@@ -17,6 +17,7 @@ from decimal import Decimal
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .i18n import Problem, t
 from .money import D, plain
 from .models import Promo, PromoUse
 from .utils import utcnow
@@ -25,7 +26,7 @@ MIN_MARGIN = Decimal("0.1")  # % of the nominal that always stays ours, whatever
 CODE_RE = re.compile(r"^[A-Z0-9_-]{3,32}$")
 
 
-class PromoError(Exception):
+class PromoError(Problem):
     pass
 
 
@@ -41,21 +42,21 @@ def combined(client_pct: Decimal, supplier_pct: Decimal, promo_pct: Decimal | No
 
 
 def label(p: Promo) -> str:
-    return f"−{plain(p.value)}% к скидке" if p.kind == "discount" else f"+${plain(p.value)} на баланс"
+    return t("promo.label.discount" if p.kind == "discount" else "promo.label.bonus", value=plain(p.value))
 
 
 async def find(s: AsyncSession, code: str) -> Promo:
     """The code if it can be used right now (not whether this client already did), else PromoError."""
     code = normalize(code)
     if not CODE_RE.match(code):
-        raise PromoError("Такого промокода нет")
+        raise PromoError("promo.not_found")
     p = (await s.execute(select(Promo).where(Promo.code == code))).scalar_one_or_none()
     if not p or not p.active:
-        raise PromoError("Такого промокода нет")
+        raise PromoError("promo.not_found")
     if p.expires_at and p.expires_at <= utcnow():
-        raise PromoError("Срок действия промокода истёк")
+        raise PromoError("promo.expired")
     if p.max_uses is not None and p.used >= p.max_uses:
-        raise PromoError("Промокод закончился")
+        raise PromoError("promo.used_up")
     return p
 
 
@@ -73,10 +74,10 @@ async def take(s: AsyncSession, p: Promo, user_id: int, order_id: int | None = N
         or_(Promo.expires_at.is_(None), Promo.expires_at > now),
     ).values(used=Promo.used + 1).execution_options(synchronize_session=False))
     if res.rowcount != 1:
-        raise PromoError("Промокод закончился")
+        raise PromoError("promo.used_up")
     # the UPDATE above holds the database's write turn, so this count can't race another use by the same client
     if await uses_by(s, p.id, user_id) >= p.per_user:
-        raise PromoError("Вы уже использовали этот промокод")
+        raise PromoError("promo.already_used")
     s.add(PromoUse(promo_id=p.id, user_id=user_id, order_id=order_id))
     await s.flush()
 
@@ -97,30 +98,30 @@ async def redeem_bonus(s: AsyncSession, user_id: int, code: str) -> tuple[Promo,
 
     p = await find(s, code)
     if p.kind != "bonus":
-        raise PromoError("Это промокод на скидку — введите его при оформлении заказа")
+        raise PromoError("promo.discount_on_site")
     await take(s, p, user_id)
-    new = await change_balance(s, user_id, to_micro(p.value), "promo", comment=f"Промокод {p.code}")
+    new = await change_balance(s, user_id, to_micro(p.value), "promo", comment=p.code)  # the kind says "promo code"
     return p, new
 
 
 def parse_new(args: list[str]) -> dict:
     """/promo new CODE 0.5% [uses] [7d]   or   /promo new CODE $2 [uses] [30d]"""
     if len(args) < 2:
-        raise PromoError("Формат: <code>/promo new КОД 0.5% [лимит] [7d]</code> или <code>/promo new КОД $2 [лимит] [30d]</code>")
+        raise PromoError("promo.admin_format")
     code, val = normalize(args[0]), args[1].replace(",", ".")
     if not CODE_RE.match(code):
-        raise PromoError("Код: 3–32 символа, латиница, цифры, _ и -")
+        raise PromoError("promo.admin_code")
     try:
         if val.endswith("%"):
             kind, value = "discount", D(val[:-1])
         elif val.startswith("$"):
             kind, value = "bonus", D(val[1:])
         else:
-            raise PromoError("Размер: <code>0.5%</code> (скидка) или <code>$2</code> (на баланс)")
+            raise PromoError("promo.admin_size")
     except (ArithmeticError, ValueError) as err:
-        raise PromoError("Размер числом: 0.5% или $2") from err
+        raise PromoError("promo.admin_size_number") from err
     if value <= 0 or (kind == "discount" and value > 50) or (kind == "bonus" and value > 1000):
-        raise PromoError("Слишком большой или нулевой размер")
+        raise PromoError("promo.admin_size_range")
     uses, days = None, None
     for extra in args[2:]:
         if extra.endswith("d") and extra[:-1].isdigit():
@@ -128,6 +129,6 @@ def parse_new(args: list[str]) -> dict:
         elif extra.isdigit():
             uses = int(extra)
         else:
-            raise PromoError(f"Не понял «{extra}»: лимит — число, срок — например 7d")
+            raise PromoError("promo.admin_extra", part=extra)
     return {"code": code, "kind": kind, "value": value, "max_uses": uses,
             "expires_at": utcnow() + timedelta(days=days) if days else None}

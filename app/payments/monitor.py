@@ -17,7 +17,7 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import events, outbox
+from .. import events, i18n, outbox
 from ..config import settings
 from ..db import session_scope
 from ..ledger import change_balance
@@ -289,32 +289,38 @@ async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
                 "coin": m.coin, "network": m.network, "txid": t.txid, "balance_usd": usd_str(bal, 6)})
         paid = f"{plain(t.amount)} {m.coin} · {m.network_title if m.network == m.coin else m.network}"
         uid = inv.user_id
+        lang = i18n.user_lang(payer)
         if res.get("paid_order"):
-            await outbox.to_user(s, uid, f"{e('card')} <b>Оплата получена</b> · {paid}\n"
-                                 + panel(f"{e('wait')} Пополняем Steam <code>{esc(order.steam_login)}</code> на "
-                                         f"<b>{fmt_amount(order.amount, order.currency)}</b>…")
-                                 + f"\nПришлю сообщение, как только всё будет готово.\n<i>Заказ {order.public_id}</i>",
-                                 kb([btn("Мои заказы", cb="m:orders", icon="orders")]))
+            await outbox.to_user(s, uid, f"{e('card')} {i18n.t('notify.paid.title', lang, paid=paid)}\n"
+                                 + panel(f"{e('wait')} " + i18n.t("notify.paid.topping", lang, login=esc(order.steam_login),
+                                                            amount=fmt_amount(order.amount, order.currency)))
+                                 + f"\n{i18n.t('notify.paid.will_tell', lang)}\n{i18n.t('notify.order_ref', lang, order=order.public_id)}",
+                                 kb([btn(i18n.t("btn.my_orders", lang), cb="m:orders", icon="orders")]))
         elif res.get("late"):
-            await outbox.to_user(s, uid, f"{e('money')} <b>Платёж зачислен на баланс</b> · {paid}\n"
-                                 + panel(f"+<b>${usd_str(value)}</b> → баланс ${usd_str(bal)}")
-                                 + "\nОн пришёл после истечения счёта, поэтому заказ не выполнен автоматически. "
-                                 "Оформите заказ заново — он оплатится с баланса.",
-                                 kb([btn("Оформить заказ", url=site("/"), style=PRIMARY, icon="rocket")]))
+            await outbox.to_user(s, uid, f"{e('money')} {i18n.t('notify.late.title', lang, paid=paid)}\n"
+                                 + panel(i18n.t("notify.late.line", lang, value=usd_str(value), balance=usd_str(bal)))
+                                 + f"\n{i18n.t('notify.late.body', lang)}",
+                                 kb([btn(i18n.t("btn.place_order", lang), url=site("/"), style=PRIMARY, icon="rocket")]))
         elif res.get("remainder_invoice") is not None:
             ri, pid = res["remainder_invoice"], order.public_id if order else ""
-            await outbox.to_user(s, uid, f"{e('warn')} <b>Не хватает для заказа {pid}</b>\n"
-                                 + panel(f"Получено ${usd_str(value)}, не хватает ${usd_str(res.get('missing'))}.")
-                                 + f"\nДоплатите <b>{plain(ri.amount)} {m.coin}</b> ({m.network}) — новый счёт уже на сайте.",
-                                 kb([btn("Открыть счёт", url=site(f"/#/order/{pid}"), style=PRIMARY, icon="card")]))
+            await outbox.to_user(s, uid, f"{e('warn')} {i18n.t('notify.partial.title', lang, order=pid)}\n"
+                                 + panel(i18n.t("notify.partial.line", lang, got=usd_str(value), missing=usd_str(res.get("missing"))))
+                                 + "\n" + i18n.t("notify.partial.pay_rest", lang, amount=plain(ri.amount), coin=m.coin,
+                                             network=m.network),
+                                 kb([btn(i18n.t("btn.open_invoice", lang), url=site(f"/#/order/{pid}"), style=PRIMARY, icon="card")]))
         elif order is None:
-            await outbox.to_user(s, uid, f"{e('money')} <b>Баланс пополнен</b>\n"
-                                 + panel(f"+<b>${usd_str(value)}</b> · {paid}", f"На балансе: <b>${usd_str(bal)}</b>"),
-                                 kb([btn("Пополнить Steam", url=site("/"), style=PRIMARY, icon="rocket")],
-                                    [btn("Баланс", cb="m:bal", style=SUCCESS, icon="money")]))
+            await outbox.to_user(s, uid, f"{e('money')} {i18n.t('notify.deposit.title', lang)}\n"
+                                 + panel(i18n.t("notify.deposit.line", lang, value=usd_str(value), paid=paid),
+                                         i18n.t("notify.deposit.balance", lang, balance=usd_str(bal))),
+                                 kb([btn(i18n.t("btn.topup_steam", lang), url=site("/"), style=PRIMARY, icon="rocket")],
+                                    [btn(i18n.t("btn.balance", lang), cb="m:bal", style=SUCCESS, icon="money")]))
             await outbox.to_admins(s, f"{e('money')} <b>Пополнение баланса</b> · +${usd_str(value)}\n"
                                       f"{e('user')} {esc(payer.display_name)} · {paid}",
                                    kb([btn("Транзакция", url=m.tx_url(t.txid), icon="tx")]))
+
+
+def _support_kb(lang: str):
+    return kb([btn(i18n.t("btn.support", lang), url=settings.support_url, icon="support")] if settings.support_url else [])
 
 
 def _primary_base(w: Watcher | None) -> str | None:
@@ -376,10 +382,10 @@ async def release_transfer(tid: int, approve: bool) -> str:
             return "Зачисляю"
         t.status, t.note = "rejected", "отклонено администратором: второй источник не подтвердил"
         if t.user_id:
-            await outbox.to_user(s, t.user_id, f"{e('fail')} <b>Платёж не подтвердился</b>\n"
-                                 "Мы не смогли подтвердить эту транзакцию в сети, поэтому не зачислили её. "
-                                 "Если это ошибка — напишите в поддержку, разберёмся.",
-                                 kb([btn("Поддержка", url=settings.support_url, icon="support")] if settings.support_url else []))
+            lang = await i18n.lang_of_user(s, t.user_id)
+            await outbox.to_user(s, t.user_id, f"{e('fail')} {i18n.t('notify.not_confirmed.title', lang)}\n"
+                                 f"{i18n.t('notify.not_confirmed.body', lang)} {i18n.t('notify.contact_support', lang)}",
+                                 _support_kb(lang))
         return "Отклонено"
 
 
@@ -443,9 +449,9 @@ async def approve_claim(claim_id: int, approve: bool) -> str:
             return "Заявка уже обработана"
         if not approve:
             c.status, c.resolved_at, c.note = "rejected", utcnow(), "отклонено администратором"
-            await outbox.to_user(s, c.user_id, f"{e('fail')} <b>Заявка на зачисление отклонена</b>\n"
-                                 "Если это ошибка — напишите в поддержку, разберёмся.",
-                                 kb([btn("Поддержка", url=settings.support_url, icon="support")] if settings.support_url else []))
+            lang = await i18n.lang_of_user(s, c.user_id)
+            await outbox.to_user(s, c.user_id, f"{e('fail')} {i18n.t('notify.claim_rejected.title', lang)}\n"
+                                 f"{i18n.t('notify.contact_support', lang)}", _support_kb(lang))
             return "Отклонено"
         else:
             won = await s.execute(update(Transfer).where(Transfer.id == t.id, Transfer.status == "unmatched")
@@ -456,7 +462,7 @@ async def approve_claim(claim_id: int, approve: bool) -> str:
             m = METHODS[t.method]
             value = to_micro(t.amount * eff)
             await change_balance(s, c.user_id, value, "deposit", transfer_id=t.id,
-                                 comment=f"{plain(t.amount)} {m.coin} ({m.network}), заявка #{c.id}")
+                                 comment=f"{plain(t.amount)} {m.coin} ({m.network}) · #{c.id}")
             t.status, t.user_id, t.credited_micro = "credited", c.user_id, value
             c.status, c.resolved_at = "approved", utcnow()
             paid = False
@@ -468,9 +474,11 @@ async def approve_claim(claim_id: int, approve: bool) -> str:
                     from ..orders import try_charge
                     paid = await try_charge(s, o)
             usd = usd_str(value)
-            await outbox.to_user(s, c.user_id, f"{e('ok')} <b>Платёж подтверждён</b>\n+<b>${usd}</b> на балансе."
-                                 + (f"\n{e('wait')} Заказ оплачен, пополняем Steam…" if paid else ""),
-                                 kb([btn("Мои заказы" if paid else "Пополнить Steam",
+            lang = await i18n.lang_of_user(s, c.user_id)
+            await outbox.to_user(s, c.user_id, f"{e('ok')} {i18n.t('notify.claim_ok.title', lang)}\n"
+                                 + i18n.t("notify.claim_ok.body", lang, amount=usd)
+                                 + (f"\n{e('wait')} {i18n.t('notify.claim_ok.paid', lang)}" if paid else ""),
+                                 kb([btn(i18n.t("btn.my_orders" if paid else "btn.topup_steam", lang),
                                          **({"cb": "m:orders"} if paid else {"url": site("/")}),
                                          style=PRIMARY, icon="orders" if paid else "rocket")]))
     return f"Зачислено ${usd}"

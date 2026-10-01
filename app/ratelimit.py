@@ -5,6 +5,8 @@ from collections import defaultdict, deque
 
 from fastapi import HTTPException
 
+from .i18n import t
+
 _hits: dict[str, deque] = defaultdict(deque)
 
 
@@ -15,7 +17,7 @@ def hit(key: str, limit: int, per: float) -> None:
     while q and now - q[0] > per:
         q.popleft()
     if len(q) >= limit:
-        raise HTTPException(429, "Слишком много запросов, подождите немного")
+        raise HTTPException(429, t("err.rate_limited"))
     q.append(now)
     if len(_hits) > 50_000:
         _hits.clear()

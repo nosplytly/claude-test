@@ -210,7 +210,9 @@ async def main():
     async with session_scope() as s:
         u = (await s.execute(select(DbUser).where(DbUser.tg_id == 555))).scalar_one()
     check(u.balance_micro == 5_000_000, "/bal @ivan +5 → баланс $5.00")
-    check(any(isinstance(c, SendMessage) and c.chat_id == 555 and "Баланс изменён" in c.text for c in out),
+    before = len(session.calls)
+    await side_jobs()  # the customer's news goes through the outbox, in the same transaction as the change
+    check(any(isinstance(c, SendMessage) and c.chat_id == 555 and "Баланс изменён" in c.text for c in session.calls[before:]),
           "клиенту пришло уведомление об изменении баланса")
     out = await send_text(999, "/bal @ivan -50", "boss")
     check("Недостаточно" in texts(out), "/bal в минус больше баланса → отказ")

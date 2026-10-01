@@ -1,9 +1,11 @@
-"""English for customers whose Telegram speaks English.
+"""Languages: every customer-facing text is a key in app/locales/{ru,en}.json, rendered with t().
 
-The bot's texts are written in Russian where they're built (bot.py, orders.py, payments/monitor.py). For a customer
-whose language is English, every outgoing Bot API call — message text, photo caption, button labels, the little
-pop-up of a pressed button — goes through to_en(): a phrase book of the customer-facing Russian fragments.
-Messages to the admins stay Russian.
+    t("notify.done.body", lang, login="gaben", amount="500 ₽")
+
+- The bot answers in the language of whoever sent the update (TrackLanguage sets `current`).
+- Notifications are rendered in the RECIPIENT's language when they're queued (user_lang / lang_of_user).
+- API errors are rendered in the language of the request (the site sends X-SH-Lang; partners Accept-Language).
+- Admin screens and alerts are Russian by design (one admin team) and are not keys.
 
 A customer's language: their own choice (/language in the bot, the RU/EN switch on the site) → the language of their
 Telegram app (language_code) → Russian. Kept on the User row, and in memory for the chats the bot writes to.
@@ -11,13 +13,13 @@ Links from the bot to the site carry ?lang=…, so the site speaks the same lang
 """
 from __future__ import annotations
 
+import json
 import logging
-import re
 from contextvars import ContextVar
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram import BaseMiddleware
-from aiogram.methods import AnswerCallbackQuery
 from aiogram.types import InlineKeyboardMarkup, WebAppInfo
 from sqlalchemy import select
 
@@ -28,25 +30,67 @@ from .models import User
 log = logging.getLogger("sh.i18n")
 
 LANGS = ("ru", "en")
+DEFAULT = "ru"
 # Russian speakers mostly live with these app languages, and read Russian better than English
 RU_FAMILY = {"ru", "uk", "be", "kk", "ky", "uz", "tg", "tk", "hy", "az", "ka"}
-CYR = re.compile(r"[А-Яа-яЁё]")
+CATALOG: dict[str, dict[str, str]] = {
+    lang: json.loads((Path(__file__).parent / "locales" / f"{lang}.json").read_text(encoding="utf-8")) for lang in LANGS}
 
 _chats: dict[int, str] = {}  # tg_id → language, for messages the bot sends on its own (order done, payment in…)
 _chosen: dict[int, str] = {}  # /language of someone who never signed in: no User row to keep it on
 _codes: dict[int, str | None] = {}  # tg_id → the language_code already written to the database
-current: ContextVar[str] = ContextVar("sh_lang", default="ru")  # the language of the update being handled
+current: ContextVar[str] = ContextVar("sh_lang", default=DEFAULT)  # the language of the update / request at hand
+
+
+def t(key: str, lang: str | None = None, **params) -> str:
+    """The text for `key` in `lang` (default: the current update's or request's language)."""
+    lang = lang if lang in LANGS else current.get()
+    text = CATALOG[lang].get(key) or CATALOG[DEFAULT].get(key)
+    if text is None:
+        log.error("no text for %r", key)
+        return key
+    return text.format(**params) if params else text
+
+
+class Problem(Exception):
+    """An error a person will read: a key + parameters, rendered in the reader's language when it's shown."""
+
+    def __init__(self, key: str, **params):
+        super().__init__(key)
+        self.key, self.params = key, params
+
+    def text(self, lang: str | None = None) -> str:
+        return t(self.key, lang, **self.params)
+
+    def __str__(self) -> str:
+        return self.text()
 
 
 def lang_of(code: str | None) -> str:
-    """Telegram's language_code → the language we talk. No code at all (Telegram didn't say) → Russian."""
+    """A language tag (Telegram's language_code, Accept-Language) → the language we talk. Nothing → Russian."""
     if not code:
-        return "ru"
-    return "ru" if code.split("-")[0].lower() in RU_FAMILY else "en"
+        return DEFAULT
+    return "ru" if code.split("-")[0].split(";")[0].strip().lower() in RU_FAMILY else "en"
 
 
-def user_lang(u: User) -> str:
+def lang_of_request(headers) -> str:
+    """The site says which language it shows (X-SH-Lang); anyone else — their Accept-Language."""
+    own = (headers.get("x-sh-lang") or "").strip().lower()
+    if own in LANGS:
+        return own
+    accept = headers.get("accept-language") or ""
+    return lang_of(accept.split(",")[0]) if accept else DEFAULT
+
+
+def user_lang(u: User | None) -> str:
+    if u is None:
+        return DEFAULT
     return u.lang if u.lang in LANGS else lang_of(u.tg_lang)
+
+
+async def lang_of_user(s, user_id: int) -> str:
+    """The language to write to this customer in (inside the caller's transaction)."""
+    return user_lang(await s.get(User, user_id))
 
 
 def remember(tg_id: int, lang: str) -> None:
@@ -60,7 +104,7 @@ async def lang_for_chat(chat_id: int) -> str:
         return _chats[chat_id]
     async with session_scope() as s:
         row = (await s.execute(select(User.lang, User.tg_lang).where(User.tg_id == chat_id))).first()
-    lang = (row[0] if row[0] in LANGS else lang_of(row[1])) if row else _chosen.get(chat_id, "ru")
+    lang = (row[0] if row[0] in LANGS else lang_of(row[1])) if row else _chosen.get(chat_id, DEFAULT)
     _chats[chat_id] = lang
     return lang
 
@@ -92,153 +136,7 @@ async def choose(tg_id: int, lang: str) -> None:
     _chats[tg_id] = lang
 
 
-# ------------------------------------------------------------------ phrase book: customer-facing Russian → English
-EN: dict[str, str] = {
-    # home, balance, orders
-    "— пополнение Steam криптой": "— Steam top-ups with crypto",
-    "Привет,": "Hi,",
-    "Автоматически, сразу после подтверждения платежа": "Automatic, right after the payment is confirmed",
-    "Если что-то пошло не так — деньги вернутся на баланс": "If anything goes wrong, the money goes back to your balance",
-    "Войдите на сайте через Telegram — и здесь появятся ваши заказы и баланс.":
-        "Sign in on the site with Telegram, and your orders and balance will show up here.",
-    "Вы ещё не входили на сайт": "You haven't signed in on the site yet",
-    "Нажмите «Войти» на сайте — бот пришлёт код.": "Tap “Sign in” on the site and the bot will send you a code.",
-    "Открыть сайт": "Open the site",
-    "Пополнить Steam": "Top up Steam",
-    "Пополнить баланс": "Add funds",
-    "Пополнить ещё": "Top up again",
-    "Мои заказы": "My orders",
-    "Поддержка": "Support",
-    "Обновить": "Refresh",
-    "Назад": "Back",
-    "Меню": "Menu",
-    "Баланс": "Balance",
-    "Движений по балансу пока нет.": "No balance activity yet.",
-    "Баланс автоматически оплачивает следующие заказы.": "Your balance automatically pays for your next orders.",
-    "Заказов пока нет.": "No orders yet.",
-    "Пополнение": "Top-up",
-    "Заказ": "Order",
-    "Возврат": "Refund",
-    "Корректировка": "Adjustment",
-    "Промокод": "Promo code",
-    "ждёт оплату": "awaiting payment",
-    "оплачен": "paid",
-    "пополняется": "in progress",
-    "в очереди": "queued",
-    "проверяется": "checking",
-    "готово": "done",
-    "возврат на баланс": "refunded to balance",
-    "истёк": "expired",
-    "отменён": "cancelled",
-    "Нет доступа": "Access denied",
-    # site login
-    "Ссылка для входа устарела. Нажмите «Войти» на сайте ещё раз.": "This sign-in link has expired. Tap “Sign in” on the site again.",
-    "Вход на сайт": "Signing in to the site",
-    "Нажмите код, который сейчас показан на сайте.": "Tap the code that's shown on the site right now.",
-    "Если вы не входили — нажмите «Это не я».": "If this wasn't you, tap “Not me”.",
-    "Это не я": "Not me",
-    "Яндекс Браузер": "Yandex Browser",
-    "браузер": "browser",
-    "Код не совпал — вход отменён. Попробуйте ещё раз на сайте.": "Wrong code — sign-in cancelled. Try again on the site.",
-    "Вход подтверждён": "Sign-in confirmed",
-    "Возвращайтесь на сайт — вы уже вошли.": "Head back to the site — you're signed in.",
-    "Вернуться на сайт": "Back to the site",
-    "Готово": "Done",
-    "Вход отменён. Никто не получил доступ к вашему аккаунту.": "Sign-in cancelled. Nobody got access to your account.",
-    # balance and promo codes
-    "Баланс изменён": "Balance changed",
-    "Теперь на балансе:": "Now on your balance:",
-    "На балансе:": "Balance:",
-    "Отправьте <code>/promo КОД</code> — бонус зачислится на баланс. Промокод на скидку вводится на сайте при оформлении заказа.":
-        "Send <code>/promo CODE</code> and the bonus goes to your balance. Discount codes are entered on the site when you order.",
-    "Сначала войдите на сайте через Telegram — потом активируйте промокод.":
-        "Sign in on the site with Telegram first, then redeem the promo code.",
-    "Такого промокода нет": "No such promo code",
-    "Срок действия промокода истёк": "This promo code has expired",
-    "Промокод закончился": "This promo code has run out",
-    "Вы уже использовали этот промокод": "You've already used this promo code",
-    "Это промокод на скидку — введите его при оформлении заказа": "This is a discount code — enter it on the site when you order",
-    # orders (orders.py)
-    "Готово!": "Done!",
-    "пополнен на": "topped up with",
-    "Приятных покупок!": "Enjoy!",
-    "Не удалось пополнить Steam": "Steam top-up failed",
-    "Поставщик отклонил пополнение": "The supplier declined the top-up",
-    "Аккаунт": "Account",
-    "Причина:": "Reason:",
-    "вернулись на баланс сайта — можно оформить заказ заново.": "went back to your site balance — you can place the order again.",
-    "вернулись на баланс сайта.": "went back to your site balance.",
-    "Оформить заново": "Order again",
-    "Заказ отменён": "Order cancelled",
-    "Пополнение Steam": "Steam top-up",
-    "не выполнено.": "was not completed.",
-    "отклонено поставщиком": "rejected by the supplier",
-    # payments (payments/monitor.py)
-    "Оплата получена": "Payment received",
-    "Пополняем Steam": "Topping up Steam",
-    "</code> на <b>": "</code> with <b>",
-    "Пришлю сообщение, как только всё будет готово.": "I'll message you as soon as it's done.",
-    "Платёж зачислен на баланс": "Payment credited to your balance",
-    "→ баланс": "→ balance",
-    "Он пришёл после истечения счёта, поэтому заказ не выполнен автоматически. Оформите заказ заново — он оплатится с баланса.":
-        "It arrived after the invoice expired, so the order wasn't completed automatically. "
-        "Place the order again — it will be paid from your balance.",
-    "Оформить заказ": "Place an order",
-    "Получено": "Received",
-    ", не хватает": ", missing",
-    "Доплатите": "Please pay the remaining",
-    "— новый счёт уже на сайте.": "— a new invoice is already on the site.",
-    "Открыть счёт": "Open invoice",
-    "Баланс пополнен": "Balance topped up",
-    "Заявка на зачисление отклонена": "Your crediting request was declined",
-    "Если это ошибка — напишите в поддержку, разберёмся.": "If this is a mistake, message support and we'll sort it out.",
-    "Платёж подтверждён": "Payment confirmed",
-    "</b> на балансе.": "</b> on your balance.",
-    "Заказ оплачен, пополняем Steam…": "Order paid, topping up Steam…",
-    # waiting list for the FunPay / Playerok plugin
-    "Вы в списке!": "You're on the list!",
-    "Вы уже в списке": "You're already on the list",
-    "Напишу сюда, как только выйдет плагин для FunPay и Playerok.": "I'll message you here as soon as the FunPay & Playerok plugin is out.",
-    "Платёж не подтвердился": "Payment not confirmed",
-    "Мы не смогли подтвердить эту транзакцию в сети, поэтому не зачислили её.": "We couldn't confirm this transaction on the blockchain, so it wasn't credited.",
-    "Если это ошибка — напишите в поддержку, разберёмся.": "If this is a mistake, message support and we'll sort it out.",    # the bot's own language command
-    "Язык": "Language",
-    "Открыть": "Open",
-}
-
-PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"Скидка ([\d.,]+)%"), r"\1% off"),
-    (re.compile(r"Не хватает для заказа (\S+?)</b>"), r"Not enough for order \1</b>"),
-    (re.compile(r"\+\$([\d.,]+) на баланс"), r"+$\1 to your balance"),
-    (re.compile(r"−([\d.,]+)% к скидке"), r"extra −\1% off"),
-]
-
-
-def _phrase_regex(keys) -> re.Pattern:
-    """One pass over the text, the longest phrase first; a phrase that starts or ends with a letter must not be
-    glued to another letter (so «Заказ» doesn't bite into «Заказов»)."""
-    parts = []
-    for k in sorted(keys, key=len, reverse=True):
-        p = re.escape(k)
-        if CYR.match(k[0]):
-            p = r"(?<![А-Яа-яЁё])" + p
-        if CYR.match(k[-1]):
-            p += r"(?![А-Яа-яЁё])"
-        parts.append(p)
-    return re.compile("|".join(parts))
-
-
-_PHRASES = _phrase_regex(EN)
-
-
-def to_en(text: str) -> str:
-    if not text or not CYR.search(text):
-        return text
-    for rx, rep in PATTERNS:
-        text = rx.sub(rep, text)
-    return _PHRASES.sub(lambda m: EN[m.group(0)], text)
-
-
+# ------------------------------------------------------------------ links from the bot open the site in the same language
 def with_lang(url: str, lang: str) -> str:
     """A link to our site, opened in the given language (?lang=en). Other links and the one-time login links stay."""
     base = settings.base_url.rstrip("/")
@@ -251,8 +149,6 @@ def with_lang(url: str, lang: str) -> str:
 
 def _button(b, lang: str):
     upd = {}
-    if lang == "en" and CYR.search(b.text or ""):
-        upd["text"] = to_en(b.text)
     if b.url:
         url = with_lang(b.url, lang)
         if url != b.url:
@@ -264,37 +160,29 @@ def _button(b, lang: str):
     return b.model_copy(update=upd) if upd else b
 
 
-def localize(method, lang: str):
-    """The Bot API call as the customer should get it."""
-    upd = {}
-    if lang == "en":
-        for field in ("text", "caption"):
-            v = getattr(method, field, None)
-            if isinstance(v, str) and CYR.search(v):
-                upd[field] = to_en(v)
+def site_links(method, lang: str):
     markup = getattr(method, "reply_markup", None)
-    if isinstance(markup, InlineKeyboardMarkup):
-        rows = [[_button(b, lang) for b in row] for row in markup.inline_keyboard]
-        if rows != markup.inline_keyboard:
-            upd["reply_markup"] = InlineKeyboardMarkup(inline_keyboard=rows)
-    return method.model_copy(update=upd) if upd else method
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return method
+    rows = [[_button(b, lang) for b in row] for row in markup.inline_keyboard]
+    if rows == markup.inline_keyboard:
+        return method
+    return method.model_copy(update={"reply_markup": InlineKeyboardMarkup(inline_keyboard=rows)})
 
 
 async def outgoing(make_request, bot, method):
-    """Bot session middleware: customers get their language; admins, and calls that aren't to a chat, stay as they are."""
+    """Bot session middleware: site links in a customer's message open the site in the customer's language."""
     chat_id = getattr(method, "chat_id", None)
     try:
         if isinstance(chat_id, int) and chat_id not in settings.admin_ids:
-            method = localize(method, await lang_for_chat(chat_id))
-        elif isinstance(method, AnswerCallbackQuery) and current.get() == "en":
-            method = localize(method, "en")
-    except Exception:  # noqa: BLE001 - a translation problem must never stop a message; Russian is better than nothing
-        log.exception("translating %s failed", type(method).__name__)
+            method = site_links(method, await lang_for_chat(chat_id))
+    except Exception:  # noqa: BLE001 - a link tweak must never stop a message
+        log.exception("site links in %s", type(method).__name__)
     return await make_request(bot, method)
 
 
 class TrackLanguage(BaseMiddleware):
-    """Dispatcher middleware: notes the language of whoever sent the update, for the answers to it."""
+    """Dispatcher middleware: the language of whoever sent the update, for the answers to it."""
 
     async def __call__(self, handler, event, data):
         u = data.get("event_from_user")

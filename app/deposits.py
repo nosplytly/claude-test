@@ -23,23 +23,23 @@ async def create_deposit(s: AsyncSession, user: User, *, amount_usd, method_code
     try:
         usd = D(amount_usd).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError) as e:
-        raise OrderError("Некорректная сумма") from e
+        raise OrderError("order.bad_amount") from e
     if user.is_banned:
-        raise OrderError("Аккаунт заблокирован")
+        raise OrderError("err.account_blocked")
     if usd < settings.min_deposit_usd or usd > settings.max_deposit_usd:
-        raise OrderError(f"Сумма пополнения от ${settings.min_deposit_usd:.2f} до ${settings.max_deposit_usd:.2f}")
+        raise OrderError("deposit.amount_range", min=f"{settings.min_deposit_usd:.2f}", max=f"{settings.max_deposit_usd:.2f}")
     m = get_method(method_code or "")
     if not m or not m.enabled:
-        raise OrderError("Выберите способ оплаты")
+        raise OrderError("err.method")
     open_ = (await s.execute(select(func.count()).select_from(Invoice).where(
         Invoice.user_id == user.id, Invoice.order_id.is_(None), Invoice.status == "pending"))).scalar_one()
     if open_ >= 3:
-        raise OrderError("У вас уже есть 3 неоплаченных счёта на пополнение — оплатите или дождитесь их истечения")
+        raise OrderError("deposit.too_many_open")
     pid = public_id("DP")
     try:
         inv = await create_invoice(s, m=m, user_id=user.id, order_id=None, usd_micro=to_micro(usd), comment=pid)
     except PaymentUnavailable as e:
-        raise OrderError(f"Оплата в {m.title} временно недоступна, выберите другую монету") from e
+        raise OrderError("order.coin_unavailable", coin=m.title) from e
     inv.public_id = pid
     return inv
 

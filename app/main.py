@@ -17,7 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import bot as bot_mod
 from . import fail2ban as f2b
-from . import health, outbox, webhooks
+from . import health, i18n, outbox, webhooks
 from .api import router
 from .backup import run_backups
 from .report import run_reports
@@ -167,14 +167,22 @@ async def validation_error(request: Request, exc: RequestValidationError):
     if path.startswith("/auth/"):  # a damaged one-time login link: just the home page, as for an expired one
         return RedirectResponse("/", status_code=303)
     if errors and all(e.get("loc", ("",))[0] == "path" for e in errors):  # /orders/<not an id>: there's no such thing
-        return JSONResponse({"ok": False, "error": "Не найдено"} if partner else {"detail": "Не найдено"}, status_code=404)
+        return JSONResponse({"ok": False, "error": i18n.t("err.not_found")} if partner else {"detail": i18n.t("err.not_found")},
+                            status_code=404)
     if not partner:
         return JSONResponse({"detail": site_message(errors)}, status_code=422)
     if any(e.get("type") == "json_invalid" for e in errors):
-        return JSONResponse({"ok": False, "error": "Тело запроса — некорректный JSON"}, status_code=400)
+        return JSONResponse({"ok": False, "error": i18n.t("err.bad_json")}, status_code=400)
     fields = {".".join(str(x) for x in e.get("loc", [])[1:]) or "body": e.get("msg", "") for e in errors}
-    return JSONResponse({"ok": False, "error": f"Некорректные или отсутствующие поля: {', '.join(sorted(fields))}",
+    return JSONResponse({"ok": False, "error": i18n.t("err.fields", fields=", ".join(sorted(fields))),
                          "fields": fields}, status_code=400)
+
+
+@app.middleware("http")
+async def request_language(request: Request, call_next):
+    """Errors and texts in the language the caller reads: the site sends X-SH-Lang, partners Accept-Language."""
+    i18n.current.set(i18n.lang_of_request(request.headers))
+    return await call_next(request)
 
 
 # telegram.org: the Mini App SDK script; web.telegram.org may show the site in an iframe (the Mini App in Telegram
@@ -207,7 +215,7 @@ async def fail2ban_guard(request: Request, call_next):
     ip = request.client.host if request.client else None
     left = f2b.banned_for(ip)
     if left:
-        return f2b.blocked_response(request.url.path, left)
+        return f2b.blocked_response(request.url.path, left, i18n.lang_of_request(request.headers))
     resp = await call_next(request)
     f2b.observe(ip, request.method, request.url.path, resp.status_code)
     return resp

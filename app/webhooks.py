@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import events
+from .i18n import Problem
 from .db import session_scope
 from .models import User, WebhookEvent
 from .utils import iso, utcnow
@@ -34,7 +35,7 @@ _http = httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=5.0), follow_redire
                           headers={"User-Agent": "SupplierHub-Webhooks/1.0", "Content-Type": "application/json"})
 
 
-class BadWebhookUrl(ValueError):
+class BadWebhookUrl(Problem):
     pass
 
 
@@ -43,17 +44,17 @@ async def check_url(url: str) -> str:
     url = (url or "").strip()
     p = urlparse(url)
     if p.scheme != "https" or not p.hostname:
-        raise BadWebhookUrl("Нужен адрес вида https://…")
+        raise BadWebhookUrl("webhook.https")
     if len(url) > 500:
-        raise BadWebhookUrl("Слишком длинный адрес")
+        raise BadWebhookUrl("webhook.long")
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(p.hostname, p.port or 443, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
-        raise BadWebhookUrl("Домен не найден") from e
+        raise BadWebhookUrl("webhook.no_domain") from e
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if not ip.is_global:
-            raise BadWebhookUrl("Адрес ведёт во внутреннюю сеть")
+            raise BadWebhookUrl("webhook.internal")
     return url
 
 
@@ -114,7 +115,7 @@ async def _deliver(eid: int) -> None:
         url, secret, body, event = (u.webhook_url if u else None), (u.webhook_secret if u else None), ev.payload, ev.event
     error = None
     if not url or not secret:
-        error = "webhook отключён"
+        error = "webhook disabled"
     else:
         try:
             await check_url(url)
