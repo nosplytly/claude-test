@@ -199,7 +199,9 @@ EN: dict[str, str] = {
     "Вы в списке!": "You're on the list!",
     "Вы уже в списке": "You're already on the list",
     "Напишу сюда, как только выйдет плагин для FunPay и Playerok.": "I'll message you here as soon as the FunPay & Playerok plugin is out.",
-    # the bot's own language command
+    "Платёж не подтвердился": "Payment not confirmed",
+    "Мы не смогли подтвердить эту транзакцию в сети, поэтому не зачислили её.": "We couldn't confirm this transaction on the blockchain, so it wasn't credited.",
+    "Если это ошибка — напишите в поддержку, разберёмся.": "If this is a mistake, message support and we'll sort it out.",    # the bot's own language command
     "Язык": "Language",
     "Открыть": "Open",
 }

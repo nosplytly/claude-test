@@ -13,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 
 os.environ.update({"SH_ENV_FILE": os.devnull, "ENV": "prod", "DATA_DIR": tempfile.mkdtemp(prefix="sh-async-"),
-                   "NERVIXY_MOCK": "true", "BOT_TOKEN": "", "ADMIN_TG_IDS": "999", "MONITOR_ENABLED": "false",
+                   "NERVIXY_MOCK": "true", "BOT_TOKEN": "", "ADMIN_TG_IDS": "999", "MONITOR_ENABLED": "false", "CROSSCHECK_ENABLED": "false",
                    "BASE_URL": "https://sh.test",
                    "WALLET_USDT_TRC20": "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb",
                    "WALLET_BTC": "1BitcoinEaterAddressDontSendf59kuE"})

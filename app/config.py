@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     sol_rpc_url: str = "https://api.mainnet-beta.solana.com"
     btc_api_url: str = "https://mempool.space/api"
     ltc_api_url: str = "https://litecoinspace.org/api"
+    # --- second opinion before crediting (app/payments/crosscheck.py): other operators than the ones above ---
+    crosscheck_enabled: bool = True
+    tron_check_url: str = "https://tron-rpc.publicnode.com"
+    eth_check_urls: str = "https://eth.drpc.org,https://1rpc.io/eth"
+    bsc_check_urls: str = "https://bsc-dataseed.bnbchain.org,https://1rpc.io/bnb"
+    sol_check_url: str = "https://solana-rpc.publicnode.com"
+    btc_check_urls: str = "https://blockstream.info/api,https://mempool.space/api"
+    ltc_check_urls: str = "https://litecoinblockexplorer.net/api/v2,https://api.blockcypher.com/v1/ltc/main"
+    tonapi_url: str = "https://tonapi.io"
+    tonapi_key: str = ""
 
     # --- receiving wallets (public addresses only; empty = method hidden) ---
     wallet_usdt_trc20: str = ""

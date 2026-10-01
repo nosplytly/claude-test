@@ -1,4 +1,7 @@
-"""Solana: SOL and USDT(SPL) over JSON-RPC, finalized commitment only."""
+"""Solana: SOL and USDT(SPL) over JSON-RPC, finalized commitment only.
+
+Transactions come in versions legacy, 0 and 1: asking for less than the newest the RPC can return makes it
+refuse the whole call (one payment from a new wallet used to stop every Solana payment), so we ask for 1."""
 from __future__ import annotations
 
 import asyncio
@@ -64,7 +67,7 @@ class SolanaWatcher(Watcher):
             if s.get("err") or (not until and (s.get("blockTime") or 0) < min_time):
                 continue
             tx = await self.rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "commitment": "finalized",
-                                                                    "maxSupportedTransactionVersion": 0}])
+                                                                    "maxSupportedTransactionVersion": 1}])
             await asyncio.sleep(0.15)
             if not tx or (tx.get("meta") or {}).get("err"):
                 continue

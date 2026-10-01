@@ -197,11 +197,18 @@ class Transfer(TimestampMixin, Base):
     final: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(16), index=True, default="new")
     # new -> matched -> credited ; new -> unmatched -> (claimed ->) credited ; ignored
+    # matched -> held (the second provider disagreed) -> matched by an admin -> credited, or -> rejected
     invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"), index=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     credited_micro: Mapped[int | None] = mapped_column(BigInteger)
     note: Mapped[str | None] = mapped_column(Text)
     admin_alerted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # second opinion before crediting (app/payments/crosscheck.py)
+    xcheck_ok: Mapped[bool] = mapped_column(Boolean, default=False)  # confirmed by it, or released by an admin
+    xcheck_tries: Mapped[int] = mapped_column(Integer, default=0)
+    xcheck_since: Mapped[datetime | None] = mapped_column(DateTime)  # first time it couldn't tell
+    xcheck_after: Mapped[datetime | None] = mapped_column(DateTime)  # don't ask again before
+    xcheck_alerted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class LedgerEntry(Base):

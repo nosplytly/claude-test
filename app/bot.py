@@ -761,6 +761,18 @@ async def admin_claim_action(cb: CallbackQuery):
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("tx:"))
+async def admin_transfer_action(cb: CallbackQuery):
+    """A payment the second provider didn't confirm: the admin checked the explorer and decides."""
+    if not is_admin(cb.from_user.id):
+        return await cb.answer("Нет доступа", show_alert=True)
+    _, action, tid = cb.data.split(":")
+    msg = await monitor_mod.release_transfer(int(tid), action == "ok")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(f"{e('tx')} Платёж #{tid}: {esc(msg)}")
+    await cb.answer()
+
+
 async def load_pack(bot: Bot) -> None:
     """Read the owner's emoji pack from Telegram (see app/tgui.py): new emoji in it are used without a code change."""
     if not tgui.pack_name:

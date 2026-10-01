@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import events, outbox
@@ -28,6 +28,7 @@ from ..prices import price_feed
 from ..tgui import DANGER, PRIMARY, SUCCESS, btn, e, kb, panel, site
 from ..utils import background, supervised, utcnow
 from ..webhooks import queue_webhook
+from . import crosscheck
 from .chains.base import Incoming, Watcher
 from .chains.evm import EvmWatcher
 from .chains.solana import SolanaWatcher
@@ -52,6 +53,8 @@ INTERVALS = {"tron": (10, 120), "ton": (10, 120), "sol": (12, 180), "bsc": (8, 1
              "btc": (30, 300), "ltc": (40, 600)}
 CREDIT_PARALLEL = 4  # transfers of one chain verified and credited at the same time (each one is claimed atomically)
 CREDIT_IDLE = 5.0  # a credit worker looks anyway this often, even if nothing woke it
+XCHECK_BACKOFF = [10, 20, 40, 60, 120, 300]  # seconds before asking the second provider again
+XCHECK_ALERT_AFTER = timedelta(minutes=15)  # it still can't tell: an admin decides
 
 
 def build_watchers() -> dict[str, Watcher]:
@@ -170,7 +173,8 @@ async def credit_ready(watchers: dict[str, Watcher], methods: list[str] | None =
     """Credit the final matched transfers (of these methods), CREDIT_PARALLEL at a time. Two workers reaching the same
     transfer is harmless: credit_transfer claims it with an atomic UPDATE, and only one of them gets it."""
     async with session_scope() as s:
-        q = select(Transfer.id).where(Transfer.final.is_(True), Transfer.status == "matched")
+        q = select(Transfer.id).where(Transfer.final.is_(True), Transfer.status == "matched",
+                                      or_(Transfer.xcheck_after.is_(None), Transfer.xcheck_after <= utcnow()))
         if methods is not None:
             q = q.where(Transfer.method.in_(methods))
         todo = (await s.execute(q.order_by(Transfer.id))).scalars().all()
@@ -228,6 +232,8 @@ async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
             return
         m = METHODS[t.method]
         txid, bn = t.txid, t.block_number
+        expect = crosscheck.Expect(m, txid, t.uid.rsplit(":", 1)[-1], int(t.units), t.to_address)
+        second_done = t.xcheck_ok
     w = watchers.get(m.chain)
     simulated = settings.is_dev and txid.startswith("dev")  # /api/dev/pay in local mock mode
     if w and not simulated and not await w.verify(txid, bn):
@@ -237,6 +243,12 @@ async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
             t.note = "verify failed"
             t.final = False
         return
+    if not simulated and settings.crosscheck_enabled and not second_done:
+        verdict, why = await crosscheck.checker.check(expect, skip=_primary_base(w))
+        if verdict is not crosscheck.Verdict.OK:
+            await _second_opinion_failed(tid, verdict, why)
+            return
+        log.info("transfer %s: %s", txid, why)
 
     from ..orders import after_deposit, fmt_amount  # local import: orders imports payments
 
@@ -247,6 +259,7 @@ async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
         if claimed.rowcount != 1:
             return
         t = await s.get(Transfer, tid)
+        t.xcheck_ok = True
         inv = await s.get(Invoice, t.invoice_id)
         when = t.block_time or t.created_at
         eff = inv.coin_price
@@ -302,6 +315,72 @@ async def credit_transfer(tid: int, watchers: dict[str, Watcher]) -> None:
             await outbox.to_admins(s, f"{e('money')} <b>Пополнение баланса</b> · +${usd_str(value)}\n"
                                       f"{e('user')} {esc(payer.display_name)} · {paid}",
                                    kb([btn("Транзакция", url=m.tx_url(t.txid), icon="tx")]))
+
+
+def _primary_base(w: Watcher | None) -> str | None:
+    """The provider our watcher read the payment from — the second opinion must come from someone else."""
+    if w is None:
+        return None
+    if getattr(w, "providers", None):  # BTC / LTC: whichever of its providers answered last
+        return w.providers[w.active][1]
+    return getattr(w, "url", None) or getattr(w, "base", None)
+
+
+def _held_card(t: Transfer, m: Method, why: str, title: str) -> tuple[str, object]:
+    return (f"{e('alarm')} <b>{title}</b>\n"
+            + panel(f"{e('coin')} <b>{plain(t.amount)} {m.coin}</b> · {m.network_title}",
+                    f"{e('warn')} {esc(why)}")
+            + "\nДеньги клиенту не зачислены. Проверь транзакцию в обозревателе и реши:",
+            kb([btn("Зачислить", cb=f"tx:ok:{t.id}", style=SUCCESS, icon="ok"),
+                btn("Отклонить", cb=f"tx:no:{t.id}", style=DANGER, icon="cancel")],
+               [btn("Транзакция", url=m.tx_url(t.txid), icon="tx")]))
+
+
+async def _second_opinion_failed(tid: int, verdict: crosscheck.Verdict, why: str) -> None:
+    """MISMATCH: hold the transfer and ask an admin at once. UNKNOWN: ask the second provider again a bit later;
+    if it still can't tell after XCHECK_ALERT_AFTER, ask an admin (once) — the transfer keeps being re-checked."""
+    now = utcnow()
+    async with session_scope() as s:
+        t = await s.get(Transfer, tid)
+        if not t or t.status != "matched":
+            return
+        m = METHODS[t.method]
+        t.note = why[:500]
+        if verdict is crosscheck.Verdict.MISMATCH:
+            t.status = "held"
+            log.warning("transfer %s held: the second provider disagrees: %s", t.txid, why)
+            text, markup = _held_card(t, m, why, "Платёж не подтвердился вторым источником")
+            await outbox.to_admins(s, text, markup)
+            return
+        t.xcheck_tries += 1
+        t.xcheck_since = t.xcheck_since or now
+        t.xcheck_after = now + timedelta(seconds=XCHECK_BACKOFF[min(t.xcheck_tries, len(XCHECK_BACKOFF)) - 1])
+        log.info("transfer %s: second opinion not yet (%s), again at %s", t.txid, why, t.xcheck_after)
+        if now - t.xcheck_since >= XCHECK_ALERT_AFTER and not t.xcheck_alerted:
+            t.xcheck_alerted = True
+            text, markup = _held_card(t, m, why, f"Платёж ждёт второй источник уже {int((now - t.xcheck_since).total_seconds() // 60)} мин")
+            await outbox.to_admins(s, text, markup)
+
+
+async def release_transfer(tid: int, approve: bool) -> str:
+    """The admin's decision on a payment the second provider didn't confirm."""
+    async with session_scope() as s:
+        t = await s.get(Transfer, tid)
+        if not t or t.status not in ("held", "matched"):
+            return "Уже решено"
+        m = METHODS[t.method]
+        if approve:
+            t.status, t.xcheck_ok, t.xcheck_after = "matched", True, None
+            t.note = "проверено админом"
+            events.kick_after_commit(s, events.credit(m.chain))
+            return "Зачисляю"
+        t.status, t.note = "rejected", "отклонено администратором: второй источник не подтвердил"
+        if t.user_id:
+            await outbox.to_user(s, t.user_id, f"{e('fail')} <b>Платёж не подтвердился</b>\n"
+                                 "Мы не смогли подтвердить эту транзакцию в сети, поэтому не зачислили её. "
+                                 "Если это ошибка — напишите в поддержку, разберёмся.",
+                                 kb([btn("Поддержка", url=settings.support_url, icon="support")] if settings.support_url else []))
+        return "Отклонено"
 
 
 async def process_claims() -> None:
