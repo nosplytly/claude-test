@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
@@ -13,7 +13,7 @@ from .orders import OrderError
 from .payments.chains.tonutil import to_friendly
 from .payments.invoices import PaymentUnavailable, create_invoice
 from .payments.methods import METHODS, get_method
-from .utils import iso, public_id
+from .utils import iso, public_id, utcnow
 
 STAGE = {"pending": "pay", "detected": "confirming", "paid": "done", "partial": "done", "expired": "expired",
          "cancelled": "cancelled"}
@@ -31,6 +31,9 @@ async def create_deposit(s: AsyncSession, user: User, *, amount_usd, method_code
     m = get_method(method_code or "")
     if not m or not m.enabled:
         raise OrderError("err.method")
+    # write first, as create_order does: the customer's parallel requests queue up here, so the limit below holds
+    await s.execute(update(User).where(User.id == user.id).values(last_seen_at=utcnow())
+                    .execution_options(synchronize_session=False))
     open_ = (await s.execute(select(func.count()).select_from(Invoice).where(
         Invoice.user_id == user.id, Invoice.order_id.is_(None), Invoice.status == "pending"))).scalar_one()
     if open_ >= 3:

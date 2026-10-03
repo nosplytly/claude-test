@@ -1,7 +1,8 @@
 """Backups: snapshot, books check, encryption, delivery to the admins, and an actual restore with the tool.
 
 Run:  .venv\\Scripts\\python.exe tests\\test_backup.py
-Throw-away database; the "Telegram" is a recorder — nothing leaves the machine.
+Throw-away database (SQLite, or PostgreSQL with DATABASE_URL + PG_BIN: tools/run_tests.py --pg); the "Telegram" is
+a recorder — nothing leaves the machine.
 """
 import asyncio
 import os
@@ -20,9 +21,14 @@ sys.path.insert(0, str(ROOT))
 from app import backup as B  # noqa: E402
 from app import notify  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.db import init_db, session_scope  # noqa: E402
+from sqlalchemy import update  # noqa: E402
+
+from app.db import SQLITE, init_db, session_scope  # noqa: E402
 from app.ledger import change_balance  # noqa: E402
 from app.models import User  # noqa: E402
+
+SUFFIX = ".sqlite3" if SQLITE else ".dump"
+MAGIC = b"SQLite format 3" if SQLITE else b"PGDMP"
 
 OK = 0
 FILES: list[tuple[int, bytes, str, str]] = []
@@ -69,12 +75,12 @@ async def main():
           f"сумма балансов в бэкапе верна (${info['balances_micro'] / 1e6:.2f})")
 
     print("2. отправка админу")
-    check(len(FILES) == 1 and FILES[0][0] == 999 and FILES[0][2].endswith(".sqlite3.gz.enc"),
+    check(len(FILES) == 1 and FILES[0][0] == 999 and FILES[0][2].endswith(f"{SUFFIX}.gz.enc"),
           f"админу ушёл файл {FILES[0][2]}")
     blob, caption = FILES[0][1], FILES[0][3]
     check("Клиентов: 5" in caption and "балансы сходятся" in caption, "в подписи: клиенты, сумма, «балансы сходятся»")
     raw = Path(info["path"]).read_bytes()
-    check(raw[:16] not in blob and b"SQLite format 3" not in blob, "файл зашифрован: в нём не видно базы")
+    check(raw.startswith(MAGIC) and raw[:16] not in blob and MAGIC not in blob, "файл зашифрован: в нём не видно базы")
 
     print("3. шифрование")
     try:
@@ -94,30 +100,45 @@ async def main():
     print("4. восстановление инструментом")
     enc = Path(TMP) / FILES[0][2]
     enc.write_bytes(blob)
-    out = Path(TMP) / "restore" / "restored.sqlite3"
+    out = Path(TMP) / "restore" / f"restored{SUFFIX}"
     env = {**os.environ, "BACKUP_PASSWORD": settings.backup_password}
-    r = subprocess.run([sys.executable, str(ROOT / "tools" / "restore_backup.py"), str(enc), "--out", str(out)],
-                       capture_output=True, text=True, encoding="utf-8", env=env)
+    tool = [sys.executable, str(ROOT / "tools" / "restore_backup.py"), str(enc), "--out", str(out)]
+    if SQLITE:
+        r = subprocess.run(tool, capture_output=True, text=True, encoding="utf-8", env=env)
+        con = sqlite3.connect(out)
+        rows = con.execute("SELECT username, balance_micro FROM users ORDER BY id").fetchall()
+        con.close()
+    else:
+        import asyncpg  # an empty database next to the test's own, loaded by the tool, dropped afterwards
+        base = os.environ["DATABASE_URL"].split("://", 1)[1]
+        server, own = "postgresql://" + base.rsplit("/", 1)[0], base.rsplit("/", 1)[1]
+        target = f"{own}_restored"
+        admin = await asyncpg.connect(f"{server}/{own}")
+        await admin.execute(f'CREATE DATABASE "{target}"')
+        try:
+            r = subprocess.run(tool + ["--into", f"{server}/{target}"], capture_output=True, text=True,
+                               encoding="utf-8", env=env)
+            restored = await asyncpg.connect(f"{server}/{target}")
+            rows = [tuple(x) for x in await restored.fetch("SELECT username, balance_micro FROM users ORDER BY id")]
+            await restored.close()
+        finally:
+            await admin.execute(f'DROP DATABASE IF EXISTS "{target}" WITH (FORCE)')
+            await admin.close()
     check(r.returncode == 0 and out.exists() and "Готово к подмене базы" in r.stdout,
-          "tools/restore_backup.py расшифровал, проверил и записал базу")
-    con = sqlite3.connect(out)
-    rows = con.execute("SELECT username, balance_micro FROM users ORDER BY id").fetchall()
-    con.close()
+          f"tools/restore_backup.py расшифровал, проверил и восстановил базу{'' if r.returncode == 0 else ': ' + r.stdout + r.stderr}")
     check(rows == [(f"c{k}", (k + 1) * 1_500_000 - 400_000) for k in range(5)],
           "в восстановленной базе те же клиенты и те же балансы")
     r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "restore_backup.py"), str(enc), "--out", str(out)],
                         capture_output=True, text=True, encoding="utf-8", env=env)
     check(r2.returncode == 3, "поверх существующего файла инструмент не пишет")
     r3 = subprocess.run([sys.executable, str(ROOT / "tools" / "restore_backup.py"), str(enc), "--out",
-                         str(out.with_name("x.sqlite3")), "--password", "nope"],
+                         str(out.with_name(f"x{SUFFIX}")), "--password", "nope"],
                         capture_output=True, text=True, encoding="utf-8", env=env)
     check(r3.returncode == 2 and "неверный пароль" in r3.stdout, "с неверным паролем инструмент ничего не пишет")
 
     print("5. если книги не сходятся")
-    con = sqlite3.connect(Path(TMP) / "supplierhub.sqlite3")
-    con.execute("UPDATE users SET balance_micro = balance_micro + 1 WHERE username = 'c2'")  # simulated corruption
-    con.commit()
-    con.close()
+    async with session_scope() as s:  # simulated corruption: a balance changed past the ledger
+        await s.execute(update(User).where(User.username == "c2").values(balance_micro=User.balance_micro + 1))
     TEXTS.clear()
     info = await B.backup_now()
     check(not info["ok"] and len(info["mismatched"]) == 1, "бэкап заметил клиента, у которого баланс ≠ журналу")
@@ -131,7 +152,7 @@ async def main():
     info = await B.backup_now()
     check(len(FILES) == n and Path(info["path"]).exists(), "без BACKUP_PASSWORD бэкап остаётся на диске, в Telegram не уходит")
     check(any("BACKUP_PASSWORD" in t for t in TEXTS), "админ узнаёт, что пароль не задан")
-    backups = sorted((Path(TMP) / "backups").glob("supplierhub-*.sqlite3"))
+    backups = sorted((Path(TMP) / "backups").glob(f"supplierhub-*{SUFFIX}"))
     check(len(backups) == 3, f"все снимки на диске ({len(backups)}), старые сверх {B.KEEP} удаляются")
 
     print(f"\nALL GOOD: {OK} checks passed")

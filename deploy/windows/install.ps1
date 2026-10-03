@@ -9,7 +9,8 @@
        cd C:\supplierhub
        powershell -ExecutionPolicy Bypass -File .\deploy\windows\install.ps1
 
-  Ставит: Python + зависимости, nginx (HTTPS, прокси, лимиты), службы Windows с автозапуском,
+  Ставит: Python + зависимости, PostgreSQL (служба, база и пользователь; данные из SQLite переносятся сами),
+  nginx (HTTPS, прокси, лимиты), службы Windows с автозапуском,
   «fail2ban» для Windows (баны в брандмауэре за подбор пароля RDP и атаки на сайт).
   Скрипт можно запускать повторно — он переустановит всё с текущими настройками.
 #>
@@ -109,6 +110,105 @@ Quiet { & $VenvPy -m pip install --quiet --upgrade pip }
 if ($LASTEXITCODE -ne 0) { Fail "pip install не прошёл" }
 Ok "зависимости установлены"
 
+# ---------------------------------------------------------------- PostgreSQL (the database; SQLite data moves over once)
+Step "PostgreSQL"
+function New-Secret([int]$len) {  # letters and digits only: the password goes into a URL
+  $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'.ToCharArray()
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+  $limit = 256 - (256 % $chars.Length); $buf = New-Object byte[] 1; $sb = New-Object Text.StringBuilder
+  while ($sb.Length -lt $len) { $rng.GetBytes($buf); if ($buf[0] -lt $limit) { [void]$sb.Append($chars[$buf[0] % $chars.Length]) } }
+  return $sb.ToString()
+}
+function Set-EnvLine($name, $value, $comment) {
+  $t = Get-Content $envFile -Raw
+  if ($t -match "(?m)^\s*$name\s*=") { $t = $t -replace "(?m)^\s*$name\s*=.*$", "$name=$value" }
+  else { $t = $t.TrimEnd() + "`r`n# $comment`r`n$name=$value`r`n" }
+  Write-Utf8 $envFile $t
+}
+$PgVersion = "18.6-5"
+$PgDir = Join-Path $Root "pgsql"
+$PgBin = Join-Path $PgDir "bin"
+$PgData = Join-Path $Root "data\pgdata"
+$PgSvc = "supplierhub-postgres"
+$envText = Get-Content $envFile -Raw
+$ownDb = ($envText -match '(?m)^\s*DATABASE_URL\s*=\s*\S+') -and -not (Test-Path (Join-Path $PgData "PG_VERSION"))
+if ($ownDb) {
+  Ok "в .env уже задан DATABASE_URL — использую эту базу, свой PostgreSQL не ставлю"
+} else {
+  if (-not (Test-Path (Join-Path $PgBin "postgres.exe"))) {
+    $zip = Join-Path $env:TEMP "postgresql-$PgVersion-windows-x64-binaries.zip"
+    Ok "скачиваю PostgreSQL $PgVersion (официальная сборка EDB, ~370 МБ)"
+    Invoke-WebRequest "https://get.enterprisedb.com/postgresql/postgresql-$PgVersion-windows-x64-binaries.zip" -OutFile $zip
+    $x = Join-Path $env:TEMP "pgsql-x"
+    Remove-Item $x -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $x | Out-Null
+    Quiet { tar.exe -xf $zip -C $x --exclude "pgsql/pgAdmin 4" --exclude "pgsql/StackBuilder" --exclude "pgsql/symbols" }
+    if (-not (Test-Path (Join-Path $x "pgsql\bin\postgres.exe"))) { Fail "архив PostgreSQL не распаковался" }
+    Remove-Item $PgDir -Recurse -Force -ErrorAction SilentlyContinue
+    Move-Item (Join-Path $x "pgsql") $PgDir
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+  }
+  Ok ((Loud { & (Join-Path $PgBin "postgres.exe") --version }) -join " ").Trim()
+
+  $superFile = Join-Path $Root "data\postgres-superuser.txt"
+  if (-not (Test-Path (Join-Path $PgData "PG_VERSION"))) {
+    # initdb drops the Administrators group from its token, and data\ is open to Administrators and SYSTEM only:
+    # the folder gets this user explicitly (the service itself runs as SYSTEM)
+    New-Item -ItemType Directory -Force $PgData | Out-Null
+    icacls $PgData /grant "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):(OI)(CI)F" | Out-Null
+    $super = New-Secret 32
+    $pwFile = Join-Path $env:TEMP "sh-pg-$([guid]::NewGuid()).txt"
+    [IO.File]::WriteAllText($pwFile, $super)
+    Loud { & (Join-Path $PgBin "initdb.exe") -D $PgData -U postgres -A scram-sha-256 --pwfile=$pwFile -E UTF8 --locale=C }
+    Remove-Item $pwFile -Force
+    if (-not (Test-Path (Join-Path $PgData "PG_VERSION"))) { Fail "initdb не создал базу" }
+    Write-Utf8 $superFile "postgres superuser (127.0.0.1:5432): $super`r`n"
+    # only this machine may connect (the app is local), with passwords; logs inside the data folder
+    Add-Content (Join-Path $PgData "postgresql.conf") "`r`n# SupplierHub`r`nlisten_addresses = '127.0.0.1'`r`nport = 5432`r`nlogging_collector = on`r`nlog_directory = 'log'`r`nlog_rotation_age = 1d`r`nlog_min_duration_statement = 2000`r`n"
+    Ok "кластер создан в data\pgdata (пароль суперпользователя postgres: data\postgres-superuser.txt)"
+  }
+  if (-not (Get-Service $PgSvc -ErrorAction SilentlyContinue)) {
+    Loud { & (Join-Path $PgBin "pg_ctl.exe") register -N $PgSvc -D $PgData -S auto -w }
+    if (-not (Get-Service $PgSvc -ErrorAction SilentlyContinue)) { Fail "не удалось зарегистрировать службу $PgSvc" }
+  }
+  Start-Service $PgSvc
+  $ready = $false
+  foreach ($i in 1..30) { Quiet { & (Join-Path $PgBin "pg_isready.exe") -h 127.0.0.1 -p 5432 }; if ($LASTEXITCODE -eq 0) { $ready = $true; break }; Start-Sleep 1 }
+  if (-not $ready) { Fail "PostgreSQL не запустился — смотри data\pgdata\log" }
+  Ok "служба $PgSvc запущена (автозапуск), слушает только 127.0.0.1:5432"
+
+  if ($envText -notmatch '(?m)^\s*DATABASE_URL\s*=\s*\S+') {
+    $super = ((Get-Content $superFile -Raw) -split ': ')[1].Trim()
+    $appPw = New-Secret 32
+    $env:PGPASSWORD = $super
+    $psql = Join-Path $PgBin "psql.exe"
+    Quiet { & $psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DO `$`$BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'supplierhub') THEN ALTER ROLE supplierhub LOGIN PASSWORD '$appPw'; ELSE CREATE ROLE supplierhub LOGIN PASSWORD '$appPw'; END IF; END`$`$;" }
+    if ($LASTEXITCODE -ne 0) { Fail "не удалось создать пользователя базы" }
+    $exists = (& $psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -At -c "SELECT 1 FROM pg_database WHERE datname = 'supplierhub'")
+    if ($exists -ne "1") {
+      Quiet { & $psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE supplierhub OWNER supplierhub ENCODING 'UTF8'" }
+      if ($LASTEXITCODE -ne 0) { Fail "не удалось создать базу supplierhub" }
+    }
+    Remove-Item Env:\PGPASSWORD
+    $url = "postgresql://supplierhub:$appPw@127.0.0.1:5432/supplierhub"
+
+    $sqlite = Join-Path $Root "data\supplierhub.sqlite3"
+    if (Test-Path $sqlite) {
+      if (Get-Service supplierhub-app -ErrorAction SilentlyContinue) { Stop-Service supplierhub-app; Start-Sleep 3 }
+      Ok "переношу данные из SQLite (data\supplierhub.sqlite3) в PostgreSQL"
+      Loud { & $VenvPy (Join-Path $Root "tools\sqlite_to_pg.py") --sqlite $sqlite --pg $url }
+      if ($LASTEXITCODE -ne 0) { Fail "перенос данных не прошёл (SQLite не тронут, сайт можно запустить на нём: Start-Service supplierhub-app)" }
+      $kept = "$sqlite.moved-to-postgres-$(Get-Date -Format yyyyMMdd-HHmmss)"
+      Move-Item $sqlite $kept
+      foreach ($side in @("-wal", "-shm")) { if (Test-Path "$sqlite$side") { Move-Item "$sqlite$side" "$kept$side" } }
+      Ok "данные перенесены; старый файл оставлен как $(Split-Path $kept -Leaf)"
+    }
+    Set-EnvLine "DATABASE_URL" $url "the database (PostgreSQL on this server, created by install.ps1)"
+    Ok "DATABASE_URL записан в .env"
+  }
+  Set-EnvLine "PG_BIN" $PgBin "PostgreSQL tools for the daily backups (pg_dump)"
+}
+
 # ---------------------------------------------------------------- old Caddy setup -> nginx
 $caddySvc = Get-Service "supplierhub-caddy" -ErrorAction SilentlyContinue
 if ($caddySvc) {
@@ -167,7 +267,7 @@ Ok "nginx.conf ok"
 
 # ---------------------------------------------------------------- services
 Step "Службы Windows"
-function Install-Svc($id, $name, $desc, $exe, $arguments, $workdir, $stopArguments = "") {
+function Install-Svc($id, $name, $desc, $exe, $arguments, $workdir, $stopArguments = "", $depends = "") {
   $wrapper = Join-Path $Bin "$id.exe"
   $xml = Join-Path $Bin "$id.xml"
   if (Get-Service $id -ErrorAction SilentlyContinue) {
@@ -178,6 +278,7 @@ function Install-Svc($id, $name, $desc, $exe, $arguments, $workdir, $stopArgumen
   }
   Copy-Item $winsw $wrapper -Force
   $stop = if ($stopArguments) { "<stopexecutable>$exe</stopexecutable>`n  <stoparguments>$stopArguments</stoparguments>" } else { "" }
+  if ($depends) { $stop += "`n  <depend>$depends</depend>" }
   Write-Utf8 $xml @"
 <service>
   <id>$id</id>
@@ -201,8 +302,9 @@ function Install-Svc($id, $name, $desc, $exe, $arguments, $workdir, $stopArgumen
   Quiet { & $wrapper install }
   if ($LASTEXITCODE -ne 0) { Fail "Не удалось установить службу $id" }
 }
+$appDepends = if (Get-Service $PgSvc -ErrorAction SilentlyContinue) { $PgSvc } else { "" }  # the database starts first
 Install-Svc "supplierhub-app" "SupplierHub" "SupplierHub: сайт, Telegram-бот, мониторинг платежей" `
-  $VenvPy "`"$Root\run.py`"" $Root
+  $VenvPy "`"$Root\run.py`"" $Root "" $appDepends
 Install-Svc "supplierhub-nginx" "SupplierHub HTTPS" "SupplierHub: nginx (HTTPS, прокси, лимиты)" `
   $NginxExe "-p `"$NginxFwd/`"" $NginxDir "-p `"$NginxFwd/`" -s quit"
 Ok "установлены"

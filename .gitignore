@@ -5,6 +5,7 @@ __pycache__/
 data/
 certs/
 deploy/windows/bin/
+pgsql/
 *.log
 .env.demo
 .claude/

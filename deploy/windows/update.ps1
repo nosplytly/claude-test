@@ -2,8 +2,9 @@
 <#
   Обновление после замены файлов проекта (или правки .env):
       powershell -ExecutionPolicy Bypass -File .\deploy\windows\update.ps1
-  Данные (data\), .env и certs\ не трогаются.
-  Если менялся deploy\windows\nginx.conf.template или guard.ps1 — запусти install.ps1 (он повторяемый).
+  Данные (data\), .env и certs\ не трогаются. Схему базы приложение обновляет само при старте (миграции).
+  Если менялся deploy\windows\nginx.conf.template или guard.ps1, или сервер ещё на SQLite (нужен переход на
+  PostgreSQL) — запусти install.ps1 (он повторяемый).
 #>
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path

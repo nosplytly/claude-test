@@ -53,7 +53,17 @@ def _gai(host, *a, **k):
     return _orig_gai(host, *a, **k) if host in _LOCAL else _deny(host)
 
 
+_orig_create_connection = asyncio.base_events.BaseEventLoop.create_connection
+_DB = None  # the one address allowed: the PostgreSQL server, when the test runs on one (DATABASE_URL)
+if os.environ.get("DATABASE_URL", "").startswith(("postgres://", "postgresql")):
+    from urllib.parse import urlsplit
+    _u = urlsplit(os.environ["DATABASE_URL"])
+    _DB = (_u.hostname, _u.port or 5432)
+
+
 async def _no_create_connection(self, protocol_factory, host=None, port=None, **k):
+    if _DB and (host, port) == _DB:
+        return await _orig_create_connection(self, protocol_factory, host, port, **k)
     _deny(f"{host}:{port}")
 
 

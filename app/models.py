@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -12,16 +12,34 @@ from .utils import utcnow
 
 
 class DecText(TypeDecorator):
-    """Exact Decimal stored as text (SQLite has no real decimal type)."""
+    """Exact Decimal: `numeric` in PostgreSQL; text in SQLite, which has no exact decimal type. Either way the value
+    is stored in its plain form (no exponent, no trailing zeros), so both databases give back the same Decimal."""
 
     impl = String(80)
     cache_ok = True
 
+    def load_dialect_impl(self, dialect):
+        return dialect.type_descriptor(Numeric() if dialect.name == "postgresql" else String(80))
+
     def process_bind_param(self, value, dialect):
-        return None if value is None else plain(D(value))
+        if value is None:
+            return None
+        text = plain(D(value))
+        return Decimal(text) if dialect.name == "postgresql" else text
 
     def process_result_value(self, value, dialect):
         return None if value is None else Decimal(value)
+
+
+class Clip(TypeDecorator):
+    """Free text from outside (names, user agents, error texts, payment comments): cut to the column's size rather
+    than failing the write. PostgreSQL enforces VARCHAR(n); SQLite never did, so nothing ever trimmed these."""
+
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return value[: self.impl.length] if isinstance(value, str) else value
 
 
 class Base(DeclarativeBase):
@@ -38,9 +56,9 @@ class User(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
-    username: Mapped[str | None] = mapped_column(String(64))
-    first_name: Mapped[str | None] = mapped_column(String(128))
-    last_name: Mapped[str | None] = mapped_column(String(128))
+    username: Mapped[str | None] = mapped_column(Clip(64))
+    first_name: Mapped[str | None] = mapped_column(Clip(128))
+    last_name: Mapped[str | None] = mapped_column(Clip(128))
     balance_micro: Mapped[int] = mapped_column(BigInteger, default=0)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
     bot_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -49,7 +67,7 @@ class User(TimestampMixin, Base):
     webhook_url: Mapped[str | None] = mapped_column(String(500))
     webhook_secret: Mapped[str | None] = mapped_column(String(80))
     lang: Mapped[str | None] = mapped_column(String(8))  # "ru" / "en" picked by the client (bot /language, site switch)
-    tg_lang: Mapped[str | None] = mapped_column(String(16))  # their Telegram app's language: the default when not picked
+    tg_lang: Mapped[str | None] = mapped_column(Clip(16))  # their Telegram app's language: the default when not picked
 
     @property
     def display_name(self) -> str:
@@ -66,7 +84,7 @@ class WebSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     ip: Mapped[str | None] = mapped_column(String(64))
-    user_agent: Mapped[str | None] = mapped_column(String(300))
+    user_agent: Mapped[str | None] = mapped_column(Clip(300))
 
 
 class LoginRequest(Base):
@@ -82,7 +100,7 @@ class LoginRequest(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     link_used: Mapped[bool] = mapped_column(Boolean, default=False)
     ip: Mapped[str | None] = mapped_column(String(64))
-    user_agent: Mapped[str | None] = mapped_column(String(300))
+    user_agent: Mapped[str | None] = mapped_column(Clip(300))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
 
@@ -190,7 +208,7 @@ class Transfer(TimestampMixin, Base):
     to_address: Mapped[str] = mapped_column(String(128))
     units: Mapped[str] = mapped_column(String(80))
     amount: Mapped[Decimal] = mapped_column(DecText)
-    comment: Mapped[str | None] = mapped_column(String(256))
+    comment: Mapped[str | None] = mapped_column(Clip(256))
     block_number: Mapped[int | None] = mapped_column(BigInteger)
     block_time: Mapped[datetime | None] = mapped_column(DateTime)
     confirmations: Mapped[int] = mapped_column(Integer, default=0)
@@ -221,7 +239,7 @@ class LedgerEntry(Base):
     kind: Mapped[str] = mapped_column(String(16))  # deposit | order | refund | adjust
     order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"))
     transfer_id: Mapped[int | None] = mapped_column(ForeignKey("transfers.id"))
-    comment: Mapped[str | None] = mapped_column(String(300))
+    comment: Mapped[str | None] = mapped_column(Clip(300))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -268,7 +286,7 @@ class WebhookEvent(Base):
     status: Mapped[str] = mapped_column(String(12), index=True, default="pending")  # pending | sent | failed
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    last_error: Mapped[str | None] = mapped_column(String(500))
+    last_error: Mapped[str | None] = mapped_column(Clip(500))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -288,7 +306,7 @@ class OutboxMessage(Base):
     status: Mapped[str] = mapped_column(String(10), default="pending")  # pending | sent | failed
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    last_error: Mapped[str | None] = mapped_column(String(300))
+    last_error: Mapped[str | None] = mapped_column(Clip(300))
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -310,6 +328,6 @@ class Waitlist(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     topic: Mapped[str] = mapped_column(String(32))
     tg_id: Mapped[int] = mapped_column(BigInteger)
-    username: Mapped[str | None] = mapped_column(String(64))
+    username: Mapped[str | None] = mapped_column(Clip(64))
     notified_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

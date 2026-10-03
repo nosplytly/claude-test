@@ -1,25 +1,44 @@
+"""The database: PostgreSQL (DATABASE_URL) in production, or a SQLite file in DATA_DIR (local runs, tests).
+
+The schema is managed by Alembic (app/migrations): init_db() brings any database to the latest revision at start.
+"""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
 import re
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.util import await_only
 
 from .config import settings
 
-engine = create_async_engine(settings.db_url, pool_size=settings.db_pool_size, max_overflow=settings.db_max_overflow,
-                             connect_args={"timeout": 30} if settings.db_url.startswith("sqlite") else {})
+log = logging.getLogger("sh.db")
+SQLITE = settings.db_url.startswith("sqlite")
+MIGRATIONS = Path(__file__).parent / "migrations"
+BASELINE = "0001"  # the revision that matches a database created before migrations existed
+
+if SQLITE:
+    engine = create_async_engine(settings.db_url, pool_size=settings.db_pool_size, max_overflow=settings.db_max_overflow,
+                                 connect_args={"timeout": 30})
+else:
+    engine = create_async_engine(
+        settings.db_url, pool_size=settings.db_pool_size, max_overflow=settings.db_max_overflow,
+        pool_pre_ping=True, pool_recycle=1800,  # the server may drop idle connections (restart, network blip)
+        connect_args={"timeout": 30, "command_timeout": 60,
+                      "server_settings": {"application_name": "supplierhub", "timezone": "UTC"}})
 
 WRITE_WAIT = 30  # seconds a transaction may queue for its turn to write before it gives up
 _WRITE = re.compile(r"\s*(INSERT|UPDATE|DELETE|REPLACE)\b", re.I)
 _writer = asyncio.Lock()
 _writing: dict[int, asyncio.Task | None] = {}  # id(Connection) holding the write turn -> its task
 
-if settings.db_url.startswith("sqlite"):
+if SQLITE:
 
     @event.listens_for(engine.sync_engine, "connect")
     def _sqlite_pragmas(dbapi_conn, _):
@@ -73,28 +92,83 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         yield s
 
 
+def _lock_key(name: str) -> int:
+    return int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big", signed=True)
+
+
+async def serialize(s: AsyncSession, name: str) -> None:
+    """From here to commit, this transaction runs one at a time with every other one that called serialize() with
+    the same name. For checks that read across many rows and then write — the supplier's free balance against all
+    reserved orders, a unique invoice amount against all reserved ones: two transactions that both read before
+    either writes would both pass. Row locks don't help there, there is no single row to lock.
+
+    PostgreSQL: a transaction-level advisory lock, released by commit or rollback. SQLite: the transaction takes the
+    write turn now (an UPDATE that changes nothing still does), and that turn is the only one there is."""
+    if SQLITE:
+        await s.execute(text("UPDATE kv SET value = value WHERE 1 = 0"))
+    else:
+        await s.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lock_key(name)})
+
+
+# ------------------------------------------------------------------ schema: Alembic migrations
+def alembic_config(connection=None):
+    """For the app (it hands over its own connection) and for tools; the `alembic` command uses alembic.ini."""
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(MIGRATIONS))
+    cfg.set_main_option("sqlalchemy.url", settings.db_url.replace("%", "%%"))
+    cfg.attributes["connection"] = connection
+    return cfg
+
+
+def _default_of(col):
+    d = col.default
+    if d is None:
+        return None
+    return d.arg(None) if d.is_callable else d.arg if d.is_scalar else None
+
+
 def _add_missing_columns(conn) -> None:
-    """Tiny forward-only migration: add new nullable columns / indexes to existing tables."""
-    from sqlalchemy import inspect, text
+    """Bring a database made before migrations to the baseline, once, before Alembic takes over. Such databases got
+    new columns added as nullable, empty for old rows: a missing column is added now with its default, and the empty
+    values left by earlier additions are filled with it (the code reads them as that default anyway)."""
+    from sqlalchemy import literal
 
     from .models import Base
 
     insp = inspect(conn)
     for table in Base.metadata.sorted_tables:
         if not insp.has_table(table.name):
+            table.create(conn)
             continue
-        have = {c["name"] for c in insp.get_columns(table.name)}
+        have = {c["name"]: c for c in insp.get_columns(table.name)}
         for col in table.columns:
+            default = _default_of(col)
             if col.name not in have:
                 ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(conn.dialect)}'
+                if not col.nullable and default is not None:
+                    value = literal(default, col.type).compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+                    ddl += f" NOT NULL DEFAULT {value}"
                 conn.execute(text(ddl))
+            elif have[col.name]["nullable"] and not col.nullable and default is not None:
+                conn.execute(table.update().where(col.is_(None)).values({col.name: default}))
         for idx in table.indexes:
             idx.create(conn, checkfirst=True)
 
 
-async def init_db() -> None:
-    from . import models  # noqa: F401  (register tables)
+def _migrate(conn) -> None:
+    from alembic import command
 
+    tables = set(inspect(conn).get_table_names())
+    cfg = alembic_config(conn)
+    if "alembic_version" not in tables and "users" in tables:
+        _add_missing_columns(conn)
+        command.stamp(cfg, BASELINE)
+        log.info("existing database adopted by migrations at revision %s", BASELINE)
+    command.upgrade(cfg, "head")
+
+
+async def init_db() -> None:
     async with engine.begin() as conn:
-        await conn.run_sync(models.Base.metadata.create_all)
-        await conn.run_sync(_add_missing_columns)
+        await conn.run_sync(_migrate)

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     port: int = 8000
     data_dir: Path = ROOT / "data"
     database_url: str = ""
+    pg_bin: str = ""  # folder with pg_dump / pg_restore (backups); default: pgsql\bin next to the app, then PATH
     site_name: str = "SupplierHub"
 
     # --- nervixy ---
@@ -63,7 +64,7 @@ class Settings(BaseSettings):
     # --- links to the site in the bot open it as a Telegram Mini App (logged in automatically); needs https ---
     mini_app: bool = True
 
-    # --- database connection pool (SQLite: one writer at a time; readers in parallel) ---
+    # --- database connection pool (SQLite: one writer at a time, readers in parallel; PostgreSQL: all in parallel) ---
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
@@ -112,7 +113,11 @@ class Settings(BaseSettings):
 
     @property
     def db_url(self) -> str:
-        return self.database_url or f"sqlite+aiosqlite:///{(self.data_dir / 'supplierhub.sqlite3').as_posix()}"
+        """DATABASE_URL=postgresql://user:password@127.0.0.1:5432/supplierhub, or nothing: the SQLite file in DATA_DIR."""
+        url = self.database_url.strip()
+        if url.startswith(("postgres://", "postgresql://")):
+            url = "postgresql+asyncpg://" + url.split("://", 1)[1]
+        return url or f"sqlite+aiosqlite:///{(self.data_dir / 'supplierhub.sqlite3').as_posix()}"
 
     @property
     def secure_cookies(self) -> bool:

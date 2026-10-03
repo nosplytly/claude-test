@@ -41,6 +41,45 @@ def is_set(value: str) -> str:
     return f"задан ({len(value)} симв.)" if value else "не задан"
 
 
+async def check_database():
+    """PostgreSQL expected; reachable, migrated to the latest revision, books balanced, pg_dump there for backups."""
+    from alembic.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import text
+
+    from app import backup, db
+
+    if db.SQLITE:
+        warn("база — SQLite", "для запуска нужен PostgreSQL: install.ps1 ставит его и переносит данные сам")
+    try:
+        async with db.engine.connect() as conn:
+            version = (await conn.execute(text("SELECT version()" if not db.SQLITE else "SELECT sqlite_version()"))).scalar_one()
+            have_rev = await conn.run_sync(lambda c: MigrationContext.configure(c).get_current_revision())
+            info = {k: (await conn.execute(text(q))).scalar_one() for k, q in backup.COUNTS.items()} if have_rev else {}
+            mismatched = (await conn.execute(text(backup.MISMATCHED))).all() if have_rev else []
+    except Exception as e:  # noqa: BLE001
+        bad("база недоступна", f"{type(e).__name__}: {str(e)[:150]}")
+        return
+    finally:
+        await db.engine.dispose()
+    if not db.SQLITE:
+        ok("PostgreSQL отвечает", " ".join(version.split()[:2]))
+    head = ScriptDirectory.from_config(db.alembic_config()).get_current_head()
+    if have_rev == head:
+        ok("схема базы актуальна", f"миграция {head}")
+    else:
+        warn("схема базы отстаёт", f"в базе {have_rev or 'нет ревизии'}, в коде {head} — приложение обновит её само при старте")
+    if info:
+        (ok if not mismatched else bad)("балансы сходятся с журналом" if not mismatched else "балансы НЕ сходятся с журналом",
+                                        f"клиентов {info['users']}, заказов {info['orders']}"
+                                        + (f"; расходятся у {len(mismatched)}" if mismatched else ""))
+    if not db.SQLITE:
+        try:
+            ok("pg_dump для бэкапов", backup.pg_tool("pg_dump"))
+        except FileNotFoundError as e:
+            bad("pg_dump не найден", str(e))
+
+
 async def main(live: bool):
     c = httpx.AsyncClient(timeout=20, headers={"User-Agent": "SupplierHub-preflight"})
 
@@ -116,6 +155,9 @@ async def main(live: bool):
         (ok if r.status_code == 200 else bad)("TONAPI_KEY", f"tonapi ответил {r.status_code}")
     elif any(m in ("usdt_ton", "ton") for m in on):
         warn("TONAPI_KEY не задан", "вторая проверка TON-платежей на бесплатном лимите tonapi (~1 запрос/с)")
+
+    # ---------------------------------------------------------------- database
+    await check_database()
 
     # ---------------------------------------------------------------- secrets on disk
     if settings.backup_password and len(settings.backup_password) >= 16:

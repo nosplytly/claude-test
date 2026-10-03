@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import events, i18n, outbox
 from .i18n import Problem, t
 from .config import settings
-from .db import session_scope
+from .db import serialize, session_scope
 from .ledger import change_balance
 from .models import Invoice, Order, Transfer, User
 from .money import D, from_micro, plain, to_micro, usd_str
@@ -184,8 +184,9 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
     nominal = amount / fx
     cost_micro = to_micro(nominal * (1 - sd / 100), up=True)
 
-    # ---- database only from here on. Write first: SQLite then serialises this block against parallel orders, so
-    # the unpaid-orders limit and the balance check below see each other's rows (a read-first check would not).
+    # ---- database only from here on. Write first: the customer's row stays locked (PostgreSQL) / the write turn is
+    # held (SQLite) until commit, so their parallel orders queue up and the unpaid-orders limit and the balance check
+    # below see each other's rows (a read-first check would not).
     await s.execute(update(User).where(User.id == user.id).values(last_seen_at=utcnow())
                     .execution_options(synchronize_session=False))
     promo = None
@@ -209,8 +210,10 @@ async def create_order(s: AsyncSession, user: User, *, steam_login: str, amount:
     if balance_only and balance < price_micro:
         raise InsufficientBalance(balance, price_micro)
 
+    # the supplier's free balance is shared by all customers: orders from different people check it one at a time
+    await serialize(s, "supplier-capacity")
     cap = supplier_balance - await reserved_cost_micro(s)
-    if cost_micro > cap:  # alert in the background: this transaction holds the DB write lock
+    if cost_micro > cap:  # alert in the background: this transaction holds the lock
         background(notify_admins(
             f"{e('warn')} <b>Не хватает баланса nervixy</b>\n"
             + panel(f"Клиент пытается оформить заказ на ${usd_str(cost_micro)}, а свободно ${usd_str(max(cap, 0))}.",

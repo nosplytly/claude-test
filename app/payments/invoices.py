@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
+from ..db import serialize
 from ..models import Invoice
 from ..money import amount_to_units, ceil_to, from_micro, to_micro, units_to_amount
 from ..prices import price_feed
@@ -53,6 +54,7 @@ async def create_invoice(s: AsyncSession, *, m: Method, user_id: int, order_id: 
     now = utcnow()
     base_units = amount_to_units(ceil_to(from_micro(usd_micro) / eff, m.step), m.decimals)
     step_units = amount_to_units(m.step, m.decimals)
+    await serialize(s, f"invoice-amount:{m.code}")  # another process picking for the same coin waits for our commit
     taken = set((await s.execute(
         select(Invoice.units).where(Invoice.method == m.code, Invoice.reserved_until > now))).scalars())
     # no await from here to the reservation below: the pick and the reservation are atomic for the event loop
