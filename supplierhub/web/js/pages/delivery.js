@@ -316,7 +316,9 @@
           .filter(Boolean)
           .map((part) => {
             const found = /^\{(product|buyer|item)\}$/.exec(part);
-            return found ? h('span', { class: 'bubble__value' }, values[found[1]]) : part;
+            if (!found) return part;
+            // Пустая подстановка (склад выключен) — без подсветки, иначе видна пустая плашка.
+            return values[found[1]] ? h('span', { class: 'bubble__value' }, values[found[1]]) : null;
           });
         replace(preview, form.message.trim() ? parts : h('span', { class: 'bubble__empty' }, 'Напишите сообщение — здесь появится предпросмотр.'));
         let note = '';
@@ -625,7 +627,8 @@
     }
 
     function renderBanner(ov) {
-      if (!ov || ov.features.delivery) {
+      // При ошибке в config.toml режимы неизвестны — о ней скажет баннер на главной.
+      if (!ov || ov.features.delivery || ov.config_error) {
         replace(banner);
         return;
       }

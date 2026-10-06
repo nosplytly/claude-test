@@ -469,8 +469,8 @@ function fmtRelative(iso) {
   return fmtDateTime(iso);
 }
 
-/** Длительность: «2 ч 14 мин», «3 д 5 ч». */
-function fmtDuration(totalSec) {
+/** Длительность: «2 ч 14 мин», «3 д 5 ч»; short — «< 1 мин» для узких мест. */
+function fmtDuration(totalSec, short = false) {
   if (totalSec === null || totalSec === undefined) return '';
   const sec = Math.max(0, Math.floor(totalSec));
   const days = Math.floor(sec / 86400);
@@ -479,7 +479,7 @@ function fmtDuration(totalSec) {
   if (days) return `${days} д ${hours} ч`;
   if (hours) return `${hours} ч ${minutes} мин`;
   if (minutes) return `${minutes} мин`;
-  return 'меньше минуты';
+  return short ? '< 1 мин' : 'меньше минуты';
 }
 
 /* ------------------------------------------------------ События и опрос */

@@ -83,7 +83,11 @@ async function saveConfig(cfg) {
   if (result && result.restart_required) {
     toast.ok('Настройки сохранены', {
       text: 'Бот работает со старыми настройками — перезапустите его, чтобы применить.',
-      action: { label: 'Перезапустить', onClick: () => botAction('restart') },
+      action: {
+        label: 'Перезапустить',
+        // Тост мог пережить остановку бота — тогда не запускаем его заново.
+        onClick: () => (botStatus() === 'running' ? botAction('restart') : toast.info('Бот уже остановлен', { text: 'Новые настройки применятся при следующем запуске.' })),
+      },
       timeout: 12000,
     });
   } else {
@@ -204,10 +208,11 @@ function renderChrome() {
   }
 
   const st = botState(status);
-  const busy = App.botBusy || status === 'starting' || status === 'stopping';
+  // Пока бот входит в аккаунт, его можно остановить: вход может долго висеть на сети.
+  const busy = App.botBusy || status === 'stopping';
   const active = status === 'running' || status === 'starting';
   let sub = 'Не запущен';
-  if (status === 'running') sub = [username, fmtDuration(ov.bot.uptime_sec)].filter(Boolean).join(' · ') || 'В работе';
+  if (status === 'running') sub = [username, fmtDuration(ov.bot.uptime_sec, true)].filter(Boolean).join(' · ') || 'В работе';
   else if (status === 'starting') sub = 'Вход в Playerok…';
   else if (status === 'stopping') sub = 'Завершаем задачи…';
   else if (status === 'error') sub = 'Причина — на главной';

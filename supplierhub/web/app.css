@@ -1452,6 +1452,8 @@ svg {
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
+  /* Поле в фокусе не прячется под липкой панелью «Сохранить». */
+  scroll-padding-bottom: 96px;
 }
 
 .main--fill {
@@ -3372,6 +3374,11 @@ button.stockbox:hover {
   outline-offset: -2px;
 }
 
+.logview .empty {
+  font-family: var(--font);
+  line-height: 1.45;
+}
+
 .logline {
   display: grid;
   grid-template-columns: 66px 42px 168px minmax(0, 1fr);
@@ -3646,6 +3653,12 @@ mark {
   pointer-events: none;
 }
 
+/* Пока открыто окно или панель, тосты уходят влево — не закрывают их кнопки. */
+body.has-layer .toasts {
+  right: auto;
+  left: 20px;
+}
+
 .toast {
   display: flex;
   align-items: flex-start;
@@ -3726,9 +3739,9 @@ mark {
 }
 
 .toast__action {
-  flex: none;
-  align-self: center;
+  display: block;
   height: 30px;
+  margin-top: 10px;
   padding: 0 12px;
   border: 0;
   border-radius: 9px;

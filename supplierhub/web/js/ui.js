@@ -397,24 +397,30 @@ const Toasts = {
       'div',
       { class: ['toast', `toast--${kind}`], role: kind === 'error' ? 'alert' : 'status' },
       h('span', { class: 'toast__icon' }, icon(iconName, 16)),
-      h('div', { class: 'toast__body' }, h('div', { class: 'toast__title' }, title), text && h('div', { class: 'toast__text' }, text)),
-      action &&
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'toast__action',
-            onClick: () => {
-              close();
-              action.onClick();
+      h(
+        'div',
+        { class: 'toast__body' },
+        h('div', { class: 'toast__title' }, title),
+        text && h('div', { class: 'toast__text' }, text),
+        // Кнопка под текстом: так длинный текст не сжимается в узкую колонку.
+        action &&
+          h(
+            'button',
+            {
+              type: 'button',
+              class: 'toast__action',
+              onClick: () => {
+                close();
+                action.onClick();
+              },
             },
-          },
-          action.label,
-        ),
+            action.label,
+          ),
+      ),
       h('button', { type: 'button', class: 'toast__close', 'aria-label': 'Закрыть', title: 'Закрыть', onClick: close }, icon('close', 14)),
     );
     root.append(el);
-    while (root.children.length > 4) root.firstElementChild.remove();
+    while (root.children.length > 3) root.firstElementChild.remove();
     const arm = () => {
       clearTimeout(timer);
       timer = setTimeout(close, timeout);

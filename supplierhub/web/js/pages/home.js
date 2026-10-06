@@ -147,6 +147,10 @@
         const wait = btn(status === 'stopping' ? 'Останавливаем…' : 'Запускаем…', { kind: active ? 'secondary' : 'primary', size: 'lg', disabled: true });
         wait.prepend(h('span', { class: 'spinner', 'aria-hidden': 'true' }));
         actions = [wait];
+        // Вход может висеть на медленной сети — даём отменить запуск.
+        if (status === 'starting' && !busy) {
+          actions.push(btn('Отменить', { kind: 'ghost', size: 'lg', icon: 'stop', onClick: () => botAction('stop') }));
+        }
       } else if (active) {
         actions = [
           btn('Остановить', { kind: 'secondary', size: 'lg', icon: 'stop', onClick: () => botAction('stop') }),
@@ -156,6 +160,9 @@
         actions = [btn('Указать токен', { kind: 'primary', size: 'lg', icon: 'key', onClick: () => navigate('settings?focus=token'), cls: 'hero__start' })];
       } else {
         actions = [btn('Запустить бота', { kind: 'primary', size: 'lg', icon: 'play', onClick: () => botAction('start'), cls: 'hero__start' })];
+        if (status === 'error' && /токен/i.test(bot.error || '')) {
+          actions.push(btn('Настройки', { kind: 'ghost', size: 'lg', icon: 'key', onClick: () => navigate('settings?focus=token') }));
+        }
         if (status === 'error') actions.push(btn('Журнал', { kind: 'ghost', size: 'lg', icon: 'logs', onClick: () => navigate('logs') }));
       }
 

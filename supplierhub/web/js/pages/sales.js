@@ -17,12 +17,21 @@
 
   function dealChip(sale, { labelUnknown = false } = {}) {
     if (sale.status) return chip(sale.status_label || sale.status, DEAL_TONES[sale.status] || 'muted');
-    if (labelUnknown && sale.status_label) return chip(sale.status_label, 'muted');
+    // Сделка есть только в истории бота: «Сделка: нет данных», чтобы не спутать с выдачей.
+    if (labelUnknown && sale.status_label) return chip(`Сделка: ${sale.status_label.toLowerCase()}`, 'muted');
     return h('span', { class: 'dash', title: sale.status_label || '' }, '—');
   }
 
   function deliveryChip(delivery) {
     return delivery ? chip(delivery.label || delivery.status, DELIVERY_TONES[delivery.status] || 'muted') : h('span', { class: 'dash' }, '—');
+  }
+
+  /** Кнопка пустого списка: без токена бот не запустится — сначала ведём в настройки. */
+  function emptyAction() {
+    const hasToken = !(App.overview && App.overview.setup && !App.overview.setup.token);
+    return hasToken
+      ? btn('Запустить бота', { kind: 'primary', icon: 'play', onClick: () => botAction('start') })
+      : btn('Указать токен', { kind: 'primary', icon: 'key', onClick: () => navigate('settings?focus=token') });
   }
 
   function kvRow(label, value, extra) {
@@ -100,7 +109,8 @@
         'dl',
         { class: 'kv' },
         kvRow('Покупатель', sale.buyer || '—'),
-        kvRow('Создана', fmtDateTime(sale.created_at)),
+        // Для сделок только из истории бот хранит время обработки, а не создания.
+        kvRow(sale.status ? 'Создана' : 'Обработана', fmtDateTime(sale.created_at)),
         delivery && delivery.delivered_at && kvRow('Выдано', fmtDateTime(delivery.delivered_at)),
         kvRow('Номер сделки', h('code', { class: 'mono' }, String(sale.deal_id)), iconBtn('copy', 'Копировать номер', () => copyText(String(sale.deal_id)), { cls: 'kv__copy', size: 14 })),
       ),
@@ -193,7 +203,7 @@
       if (!data) return;
       const items = data.items || [];
       chips.setOptions(options(items));
-      ctx.setSubtitle(data.live ? 'Сделки в реальном времени и история автовыдачи' : 'История из state.json — запустите бота, чтобы видеть новые сделки');
+      ctx.setSubtitle(data.live ? 'Сделки в реальном времени и история автовыдачи' : 'История автовыдачи — запустите бота, чтобы видеть новые сделки');
 
       if (!items.length) {
         const running = botStatus() === 'running';
@@ -205,7 +215,7 @@
             emptyState({
               title: 'Продаж пока нет',
               text: running ? 'Как только покупатель оплатит лот, сделка появится здесь.' : 'Запустите бота — он покажет последние продажи и будет следить за новыми.',
-              action: !running && btn('Запустить бота', { kind: 'primary', icon: 'play', onClick: () => botAction('start') }),
+              action: !running && emptyAction(),
             }),
           ),
         );
