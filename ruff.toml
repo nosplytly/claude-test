@@ -1,0 +1,7 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# Кириллица в строках и комментариях — не ошибка.
+ignore = ["RUF001", "RUF002", "RUF003"]

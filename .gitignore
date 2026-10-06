@@ -1,0 +1,14 @@
+# Секреты и рабочие файлы бота
+config.toml
+state.json
+*.log
+*.log.*
+stock/*
+!stock/example.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/

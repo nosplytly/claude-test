@@ -1,0 +1,3 @@
+AAAAA-BBBBB-CCCCC
+DDDDD-EEEEE-FFFFF
+логин: user1\nпароль: pass1
