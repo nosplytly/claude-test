@@ -6,6 +6,11 @@ state.json
 stock/*
 !stock/example.txt
 
+# Сборка exe и служебные файлы приложения
+build/
+dist/
+.supplierhub*
+
 # Python
 __pycache__/
 *.py[cod]
