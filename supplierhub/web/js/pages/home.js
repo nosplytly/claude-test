@@ -120,7 +120,7 @@
       );
     }
 
-    function renderHero({ bot, account, features, busy }) {
+    function renderHero({ bot, account, features, busy, hasToken }) {
       const status = bot.status;
       const st = botState(status);
       const pending = busy || status === 'starting' || status === 'stopping';
@@ -131,6 +131,7 @@
       else if (status === 'starting') lead = 'Входим в аккаунт Playerok и загружаем последние продажи…';
       else if (status === 'stopping') lead = 'Дожидаемся текущих задач — это займёт пару секунд.';
       else if (status === 'error') lead = 'Исправьте причину и запустите бота снова.';
+      else if (!hasToken) lead = 'Укажите токен Playerok в настройках — после этого бота можно запускать.';
       else if (account) lead = 'Нажмите «Запустить», чтобы бот снова следил за продажами.';
       else lead = 'Запустите бота — он войдёт в аккаунт Playerok и начнёт следить за продажами.';
 
@@ -151,6 +152,8 @@
           btn('Остановить', { kind: 'secondary', size: 'lg', icon: 'stop', onClick: () => botAction('stop') }),
           btn('Перезапустить', { kind: 'ghost', size: 'lg', icon: 'restart', onClick: () => botAction('restart') }),
         ];
+      } else if (!hasToken) {
+        actions = [btn('Указать токен', { kind: 'primary', size: 'lg', icon: 'key', onClick: () => navigate('settings?focus=token'), cls: 'hero__start' })];
       } else {
         actions = [btn('Запустить бота', { kind: 'primary', size: 'lg', icon: 'play', onClick: () => botAction('start'), cls: 'hero__start' })];
         if (status === 'error') actions.push(btn('Журнал', { kind: 'ghost', size: 'lg', icon: 'logs', onClick: () => navigate('logs') }));
@@ -276,7 +279,7 @@
         href ? 'a' : 'div',
         { class: ['card', 'kpi', href && 'kpi--link', alert && 'kpi--alert'], href },
         h('div', { class: 'kpi__head' }, gtile(glyphName, tone, 34), h('span', { class: 'kpi__label' }, label)),
-        h('div', { class: 'kpi__value' }, value),
+        h('div', { class: 'kpi__value', title: value }, value),
         h('div', { class: 'kpi__caption' }, caption),
       );
     }
@@ -305,7 +308,7 @@
           tone: attention ? 'warning' : 'white',
           label: 'Требуют внимания',
           value: fmtInt(attention),
-          caption: attention ? 'ошибки выдачи или нет товара' : 'всё в порядке',
+          caption: attention ? 'ошибки или нет товара' : 'всё в порядке',
           href: '#/sales?filter=attention',
           alert: attention > 0,
         }),
@@ -344,7 +347,7 @@
                 'span',
                 { class: 'stock-row__main' },
                 h('span', { class: 'stock-row__name' }, `«${row.match}»`),
-                h('span', { class: 'stock-row__hint' }, row.count === 0 ? 'Товар закончился' : `Порог предупреждения — ${row.threshold}`),
+                h('span', { class: 'stock-row__hint' }, row.count === 0 ? 'Товар закончился' : `Осталось мало · порог ${row.threshold}`),
               ),
               chip(row.count === 0 ? 'Пусто' : `${fmtInt(row.count)} шт.`, row.count === 0 ? 'danger' : 'warning', { dot: false }),
               icon('chevronRight', 16, 'stock-row__chevron'),
@@ -357,7 +360,7 @@
 
     function renderLive(status) {
       const running = status === 'running';
-      replace(live, h('span', { class: ['dot', running ? 'dot--success dot--pulse' : 'dot--muted'], 'aria-hidden': 'true' }), running ? 'в реальном времени' : 'бот не запущен');
+      replace(live, h('span', { class: ['dot', running ? 'dot--success dot--pulse' : 'dot--muted'], 'aria-hidden': 'true' }), running ? 'онлайн' : 'бот не запущен');
     }
 
     function renderFeed() {
@@ -380,7 +383,7 @@
       if (!ov) return;
       section('banner', { configError: ov.config_error }, renderBanner);
       const minute = ov.bot.uptime_sec === null ? null : Math.floor(ov.bot.uptime_sec / 60);
-      section('hero', { bot: { ...ov.bot, uptime_sec: minute === null ? null : minute * 60, started_at: null }, account: ov.account, features: ov.features, busy: App.botBusy }, renderHero);
+      section('hero', { bot: { ...ov.bot, uptime_sec: minute === null ? null : minute * 60, started_at: null }, account: ov.account, features: ov.features, busy: App.botBusy, hasToken: ov.setup.token }, renderHero);
       section('setup', { setup: ov.setup, status: ov.bot.status, busy: App.botBusy }, renderSetup);
       section('kpis', ov.stats, renderKpis);
       section('stock', { low: ov.low_stock || [], total: ov.stats.stock_total }, renderStock);

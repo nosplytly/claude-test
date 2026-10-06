@@ -187,7 +187,7 @@ let chromeKey = '';
 function renderChrome() {
   const ov = App.overview;
   const status = botStatus();
-  const minutes = ov && ov.bot && ov.bot.uptime_sec !== null ? Math.floor(ov.bot.uptime_sec / 60) : null;
+  const minutes = ov && ov.bot && typeof ov.bot.uptime_sec === 'number' ? Math.floor(ov.bot.uptime_sec / 60) : null;
   const attention = ov && ov.stats ? ov.stats.attention : 0;
   const low = ov && ov.low_stock ? ov.low_stock.length : 0;
   const username = ov && ov.account ? ov.account.username : '';
@@ -207,7 +207,7 @@ function renderChrome() {
   const busy = App.botBusy || status === 'starting' || status === 'stopping';
   const active = status === 'running' || status === 'starting';
   let sub = 'Не запущен';
-  if (status === 'running') sub = `${username ? `${username} · ` : ''}${fmtDuration(ov.bot.uptime_sec)}`;
+  if (status === 'running') sub = [username, fmtDuration(ov.bot.uptime_sec)].filter(Boolean).join(' · ') || 'В работе';
   else if (status === 'starting') sub = 'Вход в Playerok…';
   else if (status === 'stopping') sub = 'Завершаем задачи…';
   else if (status === 'error') sub = 'Причина — на главной';

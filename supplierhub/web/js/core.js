@@ -390,7 +390,8 @@ function api(method, ...args) {
 /* ------------------------------------------------------- Форматирование */
 
 const NUM = new Intl.NumberFormat('ru-RU');
-const MONEY = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+const MONEY = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
+const MONEY_CENTS = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 
 function fmtInt(value) {
@@ -399,7 +400,8 @@ function fmtInt(value) {
 
 function fmtMoney(value) {
   if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '—';
-  return `${MONEY.format(Number(value))} ₽`;
+  const number = Number(value);
+  return `${(Number.isInteger(number) ? MONEY : MONEY_CENTS).format(number)} ₽`;
 }
 
 /** plural(5, ['товар', 'товара', 'товаров']) → «товаров». */

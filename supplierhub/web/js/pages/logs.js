@@ -177,10 +177,7 @@
         { class: 'toolbar logbar' },
         levels.el,
         search,
-        h('div', { class: 'toolbar__spacer' }),
-        counter,
-        h('label', { class: 'inline-toggle', for: 'log-follow' }, 'Автопрокрутка'),
-        followToggle.el,
+        h('div', { class: 'logbar__end' }, counter, h('label', { class: 'inline-toggle', for: 'log-follow' }, 'Автопрокрутка'), followToggle.el),
       ),
       h('div', { class: 'card logcard' }, view),
     );

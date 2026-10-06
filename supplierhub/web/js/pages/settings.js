@@ -57,14 +57,14 @@
     replace(el, icon(tone === 'success' ? 'check' : tone === 'danger' ? 'xCircle' : 'info', 16), h('span', {}, text));
   }
 
-  function section({ id, glyphName, title, desc, aside, children }) {
+  function section({ id, glyphName, tone = 'white', title, desc, aside, children }) {
     return h(
       'section',
       { class: 'card settings-section', id: `settings-${id}`, 'aria-labelledby': `settings-${id}-title` },
       h(
         'header',
         { class: 'settings-section__head' },
-        gtile(glyphName, 'white', 36),
+        gtile(glyphName, tone, 36),
         h('div', { class: 'settings-section__titles' }, h('h2', { id: `settings-${id}-title` }, title), desc && h('p', {}, desc)),
         aside && h('div', { class: 'settings-section__aside' }, aside),
       ),
@@ -307,6 +307,7 @@
         section({
           id: 'data',
           glyphName: 'rect',
+          tone: 'muted',
           title: 'Данные',
           desc: 'Настройки, склад, история продаж и журнал хранятся в рабочей папке',
           children: [

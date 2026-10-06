@@ -32,8 +32,18 @@
     let rules = null;
     let lastStockTotal = null;
     const banner = h('div', { class: 'delivery__banner' });
+    const restartHint = h('div', { class: 'delivery__banner' });
+    let hintStartedAt = null;
     const list = h('div', { class: 'rules' }, h('div', { class: 'card table-skeleton' }, h('div', { class: 'spinner spinner--lg' })));
-    const body = h('div', { class: 'delivery' }, banner, list);
+    const body = h('div', { class: 'delivery' }, banner, restartHint, list);
+
+    /** Бот читает правила при запуске — после правки работающему боту нужен перезапуск. */
+    function noteRestart(result) {
+      if (!result || !result.restart_required || restartHint.childElementCount) return;
+      hintStartedAt = App.overview && App.overview.bot ? App.overview.bot.started_at : null;
+      const restart = btn('Перезапустить', { kind: 'primary', size: 'sm', icon: 'restart', onClick: () => botAction('restart') });
+      replace(restartHint, callout('info', 'Бот работает со старыми правилами', 'Перезапустите его, чтобы изменения вступили в силу.', [restart]));
+    }
 
     async function load() {
       try {
@@ -118,7 +128,7 @@
           { class: 'rule__main' },
           h('div', { class: 'rule__eyebrow' }, 'Лоты, где в названии есть'),
           h('h3', { class: 'rule__match', title: rule.match }, `«${rule.match}»`),
-          h('div', { class: 'rule__message', title: rule.message }, templateText(rule.message)),
+          h('div', { class: 'rule__message', title: rule.message }, h('div', { class: 'rule__message-text' }, templateText(rule.message.replace(/\n\s*\n+/g, '\n')))),
           h(
             'div',
             { class: 'rule__actions' },
@@ -149,6 +159,7 @@
         const result = await api('move_rule', rule.id, direction);
         rules = result.items || [];
         render({ id: rule.id + direction, dir: direction });
+        noteRestart(result);
       } catch (exc) {
         toast.error('Не удалось переместить правило', { text: exc.message });
       }
@@ -165,7 +176,7 @@
       });
       if (!ok) return;
       try {
-        await api('delete_rule', rule.id);
+        noteRestart(await api('delete_rule', rule.id));
         toast.ok('Правило удалено');
         rules = null;
         await load();
@@ -363,12 +374,14 @@
           products_per_sale: form.use_stock ? perSale : rule ? rule.products_per_sale : 1,
           low_stock_alert: form.use_stock ? lowAlert : rule ? rule.low_stock_alert : 0,
         };
+        let result;
         try {
-          await api('save_rule', payload, isNew ? null : rule.id);
+          result = await api('save_rule', payload, isNew ? null : rule.id);
         } catch (exc) {
           showServerError(exc.message);
           return;
         }
+        noteRestart(result);
         entry.close(true);
         toast.ok(isNew ? 'Правило создано' : 'Правило сохранено');
         rules = null;
@@ -441,7 +454,7 @@
       const clearBtn = btn('Очистить', { kind: 'ghost-danger', size: 'sm', icon: 'trash', onClick: () => clearAll() });
       const area = h('textarea', {
         class: 'input textarea textarea--mono',
-        rows: 4,
+        rows: 3,
         spellcheck: 'false',
         placeholder: 'Один товар — одна строка\nABCD-EFGH-IJKL\nlogin: user42 \\n pass: qwerty',
       });
@@ -623,6 +636,9 @@
 
     ctx.on('overview', (ov) => {
       renderBanner(ov);
+      if (restartHint.childElementCount && (ov.bot.status !== 'running' || ov.bot.started_at !== hintStartedAt)) {
+        replace(restartHint);
+      }
       const total = ov.stats.stock_total;
       if (lastStockTotal !== null && total !== lastStockTotal) load();
       lastStockTotal = total;

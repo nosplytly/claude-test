@@ -10,7 +10,14 @@
 function btn(label, { kind = 'secondary', icon: iconName, size, onClick, type = 'button', disabled, title, cls } = {}) {
   return h(
     'button',
-    { type, class: ['btn', `btn--${kind}`, size && `btn--${size}`, !label && 'btn--icon-only', cls], onClick, disabled, title },
+    {
+      type,
+      class: ['btn', `btn--${kind}`, size && `btn--${size}`, !label && 'btn--icon-only', cls],
+      onClick,
+      disabled,
+      title,
+      'aria-label': label ? null : title,
+    },
     iconName && icon(iconName, size === 'sm' ? 15 : size === 'lg' ? 19 : 17),
     label && h('span', { class: 'btn__label' }, label),
   );
@@ -289,7 +296,12 @@ const DELIVERY_TONES = {
 };
 
 function chip(text, tone = 'muted', { dot = true, cls } = {}) {
-  return h('span', { class: ['chip', `chip--${tone}`, cls] }, dot && h('span', { class: 'chip__dot', 'aria-hidden': 'true' }), text);
+  return h(
+    'span',
+    { class: ['chip', `chip--${tone}`, cls], title: text },
+    dot && h('span', { class: 'chip__dot', 'aria-hidden': 'true' }),
+    h('span', { class: 'chip__text' }, text),
+  );
 }
 
 /** Плашка-подсказка: tone = info | warning | danger | success. */
@@ -309,7 +321,7 @@ function logoArt(state = 'idle', size = 52) {
   const last = state === 'error' ? gtile('bang', 'danger', size) : gtile('plus', 'blue', size);
   return h(
     'div',
-    { class: ['logo-art', `logo-art--${state}`], style: { '--tile': `${size}px` }, 'aria-hidden': 'true' },
+    { class: ['logo-art', `logo-art--${state}`], style: { '--art': `${size}px` }, 'aria-hidden': 'true' },
     gtile('ring', 'white', size),
     gtile('diamond', 'white', size),
     gtile('rect', 'white', size),

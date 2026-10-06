@@ -67,15 +67,23 @@
           changed();
         },
       });
+      const scopeText = h('span');
+      const updateScope = () => {
+        scopeText.textContent = form.match.length
+          ? 'Бот трогает только лоты из списка, остальные остаются как есть.'
+          : 'Список пуст — бот перевыставляет все ваши лоты.';
+      };
       const match = chipsInput({
         values: form.match,
         placeholder: 'Например: Ключ Steam — и Enter',
         id: 'relist-match',
         onChange: (values) => {
           form.match = values;
+          updateScope();
           changed();
         },
       });
+      updateScope();
 
       const modes = h(
         'section',
@@ -113,12 +121,7 @@
             control: match.el,
             hint: 'Добавьте части названий — Enter или запятая. Если список пуст, перевыставляются все лоты.',
           }).el,
-          h(
-            'div',
-            { class: 'scope' },
-            icon('info', 16),
-            h('span', {}, form.match.length ? 'Бот трогает только лоты из списка.' : 'Сейчас список пуст — бот перевыставляет все ваши лоты.'),
-          ),
+          h('div', { class: 'scope' }, icon('info', 16), scopeText),
         ),
       );
 

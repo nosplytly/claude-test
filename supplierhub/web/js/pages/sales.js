@@ -15,8 +15,10 @@
     return text.length > 10 ? `${text.slice(0, 8)}…` : text;
   }
 
-  function dealChip(sale) {
-    return sale.status ? chip(sale.status_label || sale.status, DEAL_TONES[sale.status] || 'muted') : h('span', { class: 'dash' }, '—');
+  function dealChip(sale, { labelUnknown = false } = {}) {
+    if (sale.status) return chip(sale.status_label || sale.status, DEAL_TONES[sale.status] || 'muted');
+    if (labelUnknown && sale.status_label) return chip(sale.status_label, 'muted');
+    return h('span', { class: 'dash', title: sale.status_label || '' }, '—');
   }
 
   function deliveryChip(delivery) {
@@ -90,7 +92,7 @@
         { class: 'deal__hero' },
         h('div', { class: 'deal__item' }, sale.item || 'Лот без названия'),
         h('div', { class: 'deal__price' }, fmtMoney(sale.price)),
-        h('div', { class: 'deal__chips' }, dealChip(sale), deliveryChip(delivery)),
+        h('div', { class: 'deal__chips' }, dealChip(sale, { labelUnknown: true }), delivery && deliveryChip(delivery)),
       ),
       note,
       lastError,
@@ -127,7 +129,7 @@
       render();
     }, { cls: 'segmented--chips' });
     const search = searchInput({
-      placeholder: 'Лот, покупатель или № сделки',
+      placeholder: 'Лот или покупатель',
       onInput: debounce((value) => {
         query = value.trim().toLowerCase();
         render();
@@ -141,7 +143,7 @@
       rows,
     );
     const content = h('div', { class: 'sales__content' }, h('div', { class: 'card table-skeleton' }, h('div', { class: 'spinner spinner--lg' })));
-    const body = h('div', { class: 'sales' }, h('div', { class: 'toolbar' }, chips.el, h('div', { class: 'toolbar__spacer' }), search), content);
+    const body = h('div', { class: 'sales' }, h('div', { class: 'toolbar' }, chips.el, search), content);
 
     function options(items) {
       const count = (key) => items.filter(FILTERS[key]).length;
