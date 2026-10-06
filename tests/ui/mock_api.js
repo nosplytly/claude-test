@@ -12,6 +12,8 @@
  *   error   — бот упал с ошибкой входа;
  *   config  — в config.toml ошибка проверки;
  *   xss     — названия, ники и сообщения содержат HTML (проверка экранирования).
+ * Дополнительно: ?mode=browser — режим браузера (кнопка «Выйти»),
+ * ?problem=auth|network — бот работает, но Playerok не принимает токен / нет связи.
  * Состояние доступно тестам как window.__mock, вызовы — window.__mockCalls.
  */
 (() => {
@@ -19,7 +21,9 @@
 
   if (window.pywebview && window.pywebview.api) return;
 
-  const scenario = new URLSearchParams(location.search).get('state') || 'running';
+  const query = new URLSearchParams(location.search);
+  const scenario = query.get('state') || 'running';
+  const mode = query.get('mode') === 'browser' ? 'browser' : 'window';
   const NOW = Date.now();
   const MIN = 60 * 1000;
   const iso = (ms) => new Date(ms).toISOString();
@@ -183,9 +187,22 @@
     feed: filledFeed(),
     logs: filledLogs(),
     bot: { status: 'running', error: null, startedAt: NOW - (2 * 3600 + 14 * 60) * 1000 },
-    account: { id: 'u_5f3a9c', username: tag('NeonKeys'), balance: 18450.5 },
+    account: { id: 'u_5f3a9c', username: tag('NeonKeys'), balance: 18450.5, balance_at: ago(3) },
     opened: [],
+    /** Работающий бот читает эти настройки только при запуске. */
+    restartRequired: false,
+    /** Бот работает, но не может делать своё дело: {kind, text, since}. */
+    problem: null,
+    /** Файлы склада без правила (удалили правило или выключили склад). */
+    orphans: {},
+    quit: false,
   };
+
+  if (query.get('problem') === 'auth') {
+    state.problem = { kind: 'auth', text: 'Playerok отклонил токен (401 Unauthorized) — продажи не обрабатываются.', since: ago(7) };
+  } else if (query.get('problem') === 'network') {
+    state.problem = { kind: 'network', text: 'Нет связи с Playerok уже 6 мин: Сетевая ошибка (ConnectTimeout).', since: ago(6) };
+  }
 
   if (scenario === 'stopped') {
     state.bot = { status: 'stopped', error: null, startedAt: null };
@@ -237,7 +254,7 @@
   /* ----------------------------------------------------- Вычисления */
 
   const DEAL_LABELS = { PAID: 'Оплачена', SENT: 'Отправлена', CONFIRMED: 'Завершена', ROLLED_BACK: 'Возврат', PENDING: 'Ожидает оплаты', FAILED: 'Не состоялась' };
-  const DELIVERY_LABELS = { delivered: 'Выдано', reserved: 'Выдаётся', no_stock: 'Нет товара', failed: 'Ошибка выдачи', no_rule: 'Без автовыдачи', skipped: 'Пропущена' };
+  const DELIVERY_LABELS = { delivered: 'Выдано', reserved: 'Выдаётся', no_stock: 'Нет товара', failed: 'Ошибка выдачи', no_rule: 'Без автовыдачи', skipped: 'Пропущена', manual: 'Выдано вручную' };
 
   const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   const isToday = (value) => Boolean(value) && sameDay(new Date(value), new Date());
@@ -255,8 +272,19 @@
     };
   }
 
+  const ruleFor = (item) => state.rules.find((rule) => item && String(item).toLowerCase().includes(rule.match.toLowerCase())) || null;
+
+  /** Как в бэкенде: ошибки и «нет товара» (и «нет правила», пока сделка оплачена), кроме закрытых и отмеченных вручную. */
+  function needsAttention(sale) {
+    const d = sale.delivery;
+    if (!d || ['SENT', 'CONFIRMED', 'ROLLED_BACK', 'FAILED'].includes(sale.status)) return false;
+    if (['failed', 'no_stock'].includes(d.status)) return true;
+    return d.status === 'no_rule' && sale.status === 'PAID';
+  }
+
   function saleView(sale) {
     return {
+      attention: needsAttention(sale),
       deal_id: sale.deal_id,
       url: dealUrl(sale.deal_id),
       item: sale.item,
@@ -266,7 +294,14 @@
       status_label: DEAL_LABELS[sale.status] || '—',
       created_at: sale.created_at,
       chat_url: sale.chat_id ? chatUrl(sale.chat_id) : null,
-      delivery: sale.delivery ? { ...sale.delivery, label: DELIVERY_LABELS[sale.delivery.status] || sale.delivery.status } : null,
+      delivery: sale.delivery
+        ? {
+            handled_at: null,
+            ...sale.delivery,
+            label: DELIVERY_LABELS[sale.delivery.status] || sale.delivery.status,
+            rule_available: sale.delivery.status === 'no_rule' && Boolean(ruleFor(sale.item)),
+          }
+        : null,
     };
   }
 
@@ -279,13 +314,16 @@
         error: state.bot.error,
         started_at: state.bot.startedAt ? iso(state.bot.startedAt) : null,
         uptime_sec: state.bot.startedAt && running() ? Math.floor((Date.now() - state.bot.startedAt) / 1000) : null,
+        restart_required: running() && state.restartRequired,
+        problem: running() ? state.problem : null,
+        last_poll_at: running() ? iso(Date.now()) : null,
       },
       account: state.account,
       stats: {
         sales_today: paid.length,
         revenue_today: paid.reduce((sum, s) => sum + (s.price || 0), 0),
         delivered_today: state.sales.filter((s) => s.delivery && s.delivery.status === 'delivered' && isToday(s.delivery.delivered_at)).length,
-        attention: state.sales.filter((s) => s.delivery && ['failed', 'no_stock'].includes(s.delivery.status)).length,
+        attention: state.sales.filter(needsAttention).length,
         stock_total: state.rules.reduce((sum, r) => sum + (r.stock_file ? r.stock.length : 0), 0),
       },
       low_stock: state.rules
@@ -307,12 +345,17 @@
     };
   }
 
+  /** Имя файла склада; свободный файл с товарами (без правила) подключается снова — reused. */
   function slug(text) {
     const base = text.toLowerCase().replace(/[^a-z0-9а-яё]+/g, '-').replace(/^-+|-+$/g, '') || 'stock';
     let name = `stock/${base}.txt`;
     let n = 2;
-    while (state.rules.some((r) => r.stock_file === name)) name = `stock/${base}-${n++}.txt`;
+    while (state.rules.some((r) => r.stock_file === name) || (state.orphans[name] && !state.orphans[name].length)) name = `stock/${base}-${n++}.txt`;
     return name;
+  }
+
+  function orphan(rule) {
+    if (rule.stock_file && !state.rules.some((r) => r !== rule && r.stock_file === rule.stock_file)) state.orphans[rule.stock_file] = rule.stock;
   }
 
   function validateRule(rule, number) {
@@ -344,16 +387,31 @@
     return null;
   }
 
-  function ruleAt(ruleId) {
+  /** expected — правило, каким его видело окно: по номеру могло оказаться уже другое. */
+  function ruleAt(ruleId, expected = null) {
     const rule = state.rules[ruleId];
     if (!rule) throw new Error('Правило не найдено — обновите страницу.');
+    if (expected && (expected.match !== rule.match || (expected.stock_file || null) !== rule.stock_file)) {
+      throw new Error('Правила изменились — обновите страницу.');
+    }
     return rule;
   }
 
-  function stockRule(ruleId) {
-    const rule = ruleAt(ruleId);
+  function stockRule(ruleId, expected = null) {
+    const rule = ruleAt(ruleId, expected);
     if (!rule.stock_file) throw new Error('У этого правила нет склада.');
     return rule;
+  }
+
+  /** Как в бэкенде: автовыдачу и перевыставление бот подхватывает сам, остальное — после перезапуска. */
+  function needsRestart(before, after) {
+    for (const group of ['playerok', 'telegram']) {
+      for (const key of Object.keys(after[group])) {
+        if (JSON.stringify(before[group][key]) !== JSON.stringify(after[group][key])) return true;
+      }
+    }
+    // Задачу «истёкшие лоты» бот заводит только при запуске.
+    return Boolean(after.relist.expired && !before.relist.expired);
   }
 
   /* ------------------------------------------------------------ Бот */
@@ -367,6 +425,8 @@
       setTimeout(() => {
         if (state.bot.status !== 'starting') return;
         state.bot = { status: 'running', error: null, startedAt: Date.now() };
+        state.restartRequired = false;
+        state.problem = null;
         state.account = state.account || { id: 'u_5f3a9c', username: 'NeonKeys', balance: 18450.5 };
         log('INFO', 'playerok_bot.bot', `Вход выполнен: ${state.account.username}, баланс ${state.account.balance.toFixed(2)} ₽`);
         pushFeed('info', `Бот запущен: ${state.account.username}`, `Баланс: 18 450,50 ₽\nАвтовыдача: ${state.config.delivery.enabled ? `вкл, правил: ${state.rules.length}` : 'выкл'}`);
@@ -396,7 +456,7 @@
   /* ----------------------------------------------------------- Методы */
 
   const methods = {
-    get_app_info: () => ({ version: '1.0.0', workdir: 'C:\\Users\\Артур\\Desktop\\SupplierHub', config_exists: state.configExists, mode: 'window' }),
+    get_app_info: () => ({ version: '1.0.0', workdir: 'C:\\Users\\Артур\\Desktop\\SupplierHub', config_exists: state.configExists, mode }),
 
     get_overview: () => overview(),
 
@@ -442,17 +502,19 @@
       };
       const problem = validateConfig(merged);
       if (problem) throw new Error(problem);
+      const restart = running() && needsRestart(state.config, merged);
+      state.restartRequired = state.restartRequired || restart;
       state.config = clone(merged);
       state.configExists = true;
       log('INFO', 'supplierhub', 'Настройки сохранены в config.toml');
-      return { saved: true, restart_required: running() };
+      return { saved: true, restart_required: restart };
     },
 
     list_rules: () => ({ items: state.rules.map(ruleView) }),
 
-    save_rule(rule, ruleId = null) {
+    save_rule(rule, ruleId = null, expected = null) {
       const isNew = ruleId === null || ruleId === undefined;
-      if (!isNew) ruleAt(ruleId);
+      if (!isNew) ruleAt(ruleId, expected);
       const number = isNew ? state.rules.length + 1 : ruleId + 1;
       const problem = validateRule(rule, number);
       if (problem) throw new Error(problem);
@@ -460,58 +522,64 @@
       let stockFile = null;
       if (rule.use_stock) stockFile = rule.stock_file || (previous && previous.stock_file) || slug(rule.match);
       const shared = stockFile && state.rules.find((r) => r.stock_file === stockFile);
+      const reused = Boolean(stockFile && !shared && state.orphans[stockFile] && state.orphans[stockFile].length);
       const next = {
         match: rule.match.trim(),
         message: rule.message,
         stock_file: stockFile,
         products_per_sale: rule.products_per_sale,
         low_stock_alert: rule.low_stock_alert,
-        stock: shared ? shared.stock : [],
+        stock: shared ? shared.stock : reused ? state.orphans[stockFile] : [],
       };
+      if (reused) delete state.orphans[stockFile];
+      if (previous && previous.stock_file && previous.stock_file !== stockFile) orphan(previous);
       if (isNew) state.rules.push(next);
       else state.rules[ruleId] = next;
       const index = isNew ? state.rules.length - 1 : ruleId;
       log('INFO', 'supplierhub', `Правило №${index + 1} сохранено`);
-      return { item: ruleView(next, index), restart_required: running() };
+      // Правила работающий бот подхватывает сам — перезапуск не нужен.
+      return { item: ruleView(next, index), restart_required: false, reused_stock: reused };
     },
 
-    delete_rule(ruleId) {
-      ruleAt(ruleId);
+    delete_rule(ruleId, expected = null) {
+      const rule = ruleAt(ruleId, expected);
+      orphan(rule);
       state.rules.splice(ruleId, 1);
-      return { deleted: true, restart_required: running() };
+      return { deleted: true, restart_required: false };
     },
 
-    move_rule(ruleId, direction) {
-      ruleAt(ruleId);
+    move_rule(ruleId, direction, expected = null) {
+      ruleAt(ruleId, expected);
       const target = ruleId + direction;
       if (target >= 0 && target < state.rules.length) {
         const [rule] = state.rules.splice(ruleId, 1);
         state.rules.splice(target, 0, rule);
       }
-      return { items: state.rules.map(ruleView), restart_required: running() };
+      return { items: state.rules.map(ruleView), restart_required: false };
     },
 
-    get_stock(ruleId) {
-      const rule = stockRule(ruleId);
+    get_stock(ruleId, expected = null) {
+      const rule = stockRule(ruleId, expected);
       return { rule_id: ruleId, file: rule.stock_file, items: rule.stock, count: rule.stock.length };
     },
 
-    add_stock(ruleId, text) {
-      const rule = stockRule(ruleId);
+    add_stock(ruleId, text, expected = null) {
+      const rule = stockRule(ruleId, expected);
+      if (String(text).includes('\uFFFD')) throw new Error('В тексте есть испорченные символы «\uFFFD» — сохраните файл в UTF-8.');
       const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       rule.stock.push(...lines);
       return { added: lines.length, count: rule.stock.length };
     },
 
-    remove_stock_item(ruleId, index, value) {
-      const rule = stockRule(ruleId);
+    remove_stock_item(ruleId, index, value, expected = null) {
+      const rule = stockRule(ruleId, expected);
       if (rule.stock[index] !== value) return { removed: false, count: rule.stock.length };
       rule.stock.splice(index, 1);
       return { removed: true, count: rule.stock.length };
     },
 
-    clear_stock(ruleId) {
-      const rule = stockRule(ruleId);
+    clear_stock(ruleId, expected = null) {
+      const rule = stockRule(ruleId, expected);
       const removed = rule.stock.length;
       rule.stock.splice(0);
       return { removed };
@@ -540,7 +608,39 @@
 
     open_url(url) {
       if (!/^https:\/\//.test(String(url))) throw new Error('Открывать можно только https-ссылки.');
+      if (state.openFails) throw new Error('Не удалось открыть браузер — скопируйте ссылку вручную.');
       state.opened.push(url);
+      return {};
+    },
+
+    mark_handled(dealId) {
+      const sale = state.sales.find((s) => s.deal_id === dealId);
+      if (!sale || !sale.delivery) throw new Error('Сделка не найдена.');
+      if (!['failed', 'no_stock', 'no_rule'].includes(sale.delivery.status)) throw new Error('Эту сделку отмечать не нужно.');
+      sale.delivery = { ...sale.delivery, status: 'manual', handled_at: iso(Date.now()) };
+      return { deal_id: dealId, delivery: saleView(sale).delivery };
+    },
+
+    retry_delivery(dealId) {
+      const sale = state.sales.find((s) => s.deal_id === dealId);
+      if (!sale || !sale.delivery) throw new Error('Сделка не найдена.');
+      if (!running()) throw new Error('Бот не запущен — запустите его, чтобы выдать товар.');
+      if (sale.status !== 'PAID') throw new Error('Сделка уже не ждёт выдачи.');
+      let products = sale.delivery.products;
+      if (sale.delivery.status === 'no_rule') {
+        const rule = ruleFor(sale.item);
+        if (!rule) throw new Error('Для лота нет правила автовыдачи.');
+        products = rule.stock_file ? rule.stock.splice(0, rule.products_per_sale) : [];
+      } else if (sale.delivery.status !== 'failed') {
+        throw new Error('Повторять выдачу не нужно.');
+      }
+      sale.delivery = { ...sale.delivery, status: 'delivered', products, error: null, delivered_at: iso(Date.now()) };
+      return { deal_id: dealId, status: 'delivered' };
+    },
+
+    quit_app() {
+      state.quit = true;
+      state.bot = { status: 'stopped', error: null, startedAt: null };
       return {};
     },
   };

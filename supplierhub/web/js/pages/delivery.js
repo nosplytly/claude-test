@@ -28,21 +28,149 @@
     return out;
   }
 
+  /**
+   * Текст .txt-файла. Блокнот и Excel на русской Windows сохраняют не только
+   * UTF-8, но и «ANSI» (Windows-1251) и «Юникод» (UTF-16 с BOM). Чтение как
+   * UTF-8 молча заменило бы кириллицу на «�», и покупатели получили бы мусор.
+   */
+  function decodeGoodsFile(buffer) {
+    const bytes = new Uint8Array(buffer);
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) return { text: new TextDecoder('utf-16le').decode(bytes), encoding: 'utf-16' };
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) return { text: new TextDecoder('utf-16be').decode(bytes), encoding: 'utf-16' };
+    try {
+      return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes), encoding: 'utf-8' };
+    } catch (_) {
+      return { text: new TextDecoder('windows-1251').decode(bytes), encoding: 'windows-1251' };
+    }
+  }
+
+  /** Непустые строки — так их разделит склад (по строке на товар). */
+  function goodsLines(text) {
+    return String(text)
+      .split(/\r\n|\r|\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  // «Логин: vasya», «E-mail: a@b.ru» — подпись словами, двоеточие и пробел.
+  // «vasya:Qwerty» (логин:пароль) подписью не считается.
+  const LABEL_LINE = /^([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 ._/-]{0,24}?)\s*:\s+\S/;
+
+  function lineLabel(line) {
+    const found = LABEL_LINE.exec(line);
+    return found ? found[1].trim().toLowerCase() : null;
+  }
+
+  /**
+   * Похоже ли, что один товар записан в несколько строк («Логин: …»,
+   * «Пароль: …», «Почта: …»)? Тогда вернуть строки, сгруппированные по товарам:
+   * по блокам между пустыми строками или заново с каждой первой подписью.
+   * null — подозрений нет, каждая строка и правда отдельный товар.
+   */
+  function productGroups(text) {
+    const blocks = [];
+    let current = [];
+    for (const raw of String(text).split(/\r\n|\r|\n/)) {
+      const line = raw.trim();
+      if (line) current.push(line);
+      else if (current.length) {
+        blocks.push(current);
+        current = [];
+      }
+    }
+    if (current.length) blocks.push(current);
+    const lines = blocks.flat();
+    const labels = lines.map(lineLabel).filter(Boolean);
+    if (labels.length < 2 || new Set(labels).size < 2) return null;
+
+    let groups;
+    if (blocks.length > 1 && blocks.some((block) => block.length > 1)) {
+      groups = blocks;
+    } else {
+      groups = [];
+      for (const line of lines) {
+        if (!groups.length || (lineLabel(line) === labels[0] && groups[groups.length - 1].some(lineLabel))) groups.push([]);
+        groups[groups.length - 1].push(line);
+      }
+    }
+    return groups.some((group) => group.length > 1) ? groups : null;
+  }
+
+  /** Строки одного товара — в одну строку склада через \n (бот развернёт их при выдаче). */
+  function joinGroups(groups) {
+    return groups.map((group) => group.join('\\n')).join('\n');
+  }
+
+  /**
+   * Окно с примером товаров и выбором. choices: [{value, label, kind}].
+   * Возвращает value нажатой кнопки или null (Отмена, Esc).
+   */
+  function choiceDialog({ title, text, listTitle, products, choices, tone = 'blue' }) {
+    return new Promise((resolve) => {
+      let result = null;
+      let entry = null;
+      const shown = products.slice(0, 4);
+      const buttons = choices.map((choice) =>
+        btn(choice.label, {
+          kind: choice.kind || 'secondary',
+          onClick: () => {
+            result = choice.value;
+            entry.close();
+          },
+        }),
+      );
+      const body = h(
+        'div',
+        { class: 'choice' },
+        text && h('p', { class: 'choice__text' }, text),
+        h('div', { class: 'choice__label' }, listTitle),
+        h(
+          'ol',
+          { class: 'choice__list' },
+          shown.map((value, index) => h('li', { class: 'choice__item' }, h('span', { class: 'choice__index' }, String(index + 1)), h('span', { class: 'choice__value' }, productValue(value)))),
+        ),
+        products.length > shown.length && h('p', { class: 'choice__more' }, `…и ещё ${countText(products.length - shown.length, GOODS)}`),
+      );
+      entry = openModal({
+        title,
+        lead: gtile(tone === 'warning' ? 'bang' : 'rect', tone === 'warning' ? 'warning' : 'white', 36),
+        body,
+        size: 'md',
+        footer: [btn('Отмена', { kind: 'ghost', onClick: () => entry.close() }), ...buttons],
+        initialFocus: buttons[buttons.length - 1],
+        onClose: () => resolve(result),
+      });
+    });
+  }
+
   Pages.delivery = (ctx) => {
     let rules = null;
     let lastStockTotal = null;
     const banner = h('div', { class: 'delivery__banner' });
     const restartHint = h('div', { class: 'delivery__banner' });
-    let hintStartedAt = null;
     const list = h('div', { class: 'rules' }, h('div', { class: 'card table-skeleton' }, h('div', { class: 'spinner spinner--lg' })));
     const body = h('div', { class: 'delivery' }, banner, restartHint, list);
 
-    /** Бот читает правила при запуске — после правки работающему боту нужен перезапуск. */
-    function noteRestart(result) {
-      if (!result || !result.restart_required || restartHint.childElementCount) return;
-      hintStartedAt = App.overview && App.overview.bot ? App.overview.bot.started_at : null;
+    /** Подсказка о перезапуске общая (app.js) и не пропадает при уходе со страницы. */
+    function renderRestartHint() {
+      if (!restartNeeded()) {
+        replace(restartHint);
+        return;
+      }
+      if (restartHint.childElementCount) return;
       const restart = btn('Перезапустить', { kind: 'primary', size: 'sm', icon: 'restart', onClick: () => botAction('restart') });
-      replace(restartHint, callout('info', 'Бот работает со старыми правилами', 'Перезапустите его, чтобы изменения вступили в силу.', [restart]));
+      replace(restartHint, callout('info', 'Бот работает со старыми настройками', 'Перезапустите его, чтобы изменения вступили в силу.', [restart]));
+    }
+
+    /**
+     * Правила поменялись в обход этого окна (другая вкладка, правка config.toml):
+     * бэкенд отказал, чтобы не тронуть чужой склад, — показываем актуальный список.
+     */
+    function isStale(exc) {
+      if (!/правила изменились/i.test(exc.message)) return false;
+      rules = null;
+      load();
+      return true;
     }
 
     async function load() {
@@ -92,7 +220,7 @@
       const pct = Math.max(empty ? 0 : 4, Math.min(100, (count / cap) * 100));
       return h(
         'button',
-        { type: 'button', class: ['stockbox', `stockbox--${tone}`], title: 'Открыть склад', onClick: () => openStock(rule.id) },
+        { type: 'button', class: ['stockbox', `stockbox--${tone}`], title: 'Открыть склад', onClick: () => openStock(rule) },
         h(
           'span',
           { class: 'stockbox__top' },
@@ -133,7 +261,7 @@
             'div',
             { class: 'rule__actions' },
             btn('Редактировать', { kind: 'secondary', size: 'sm', icon: 'edit', onClick: () => openEditor(rule) }),
-            hasStock && btn('Склад', { kind: 'secondary', size: 'sm', icon: 'box', onClick: () => openStock(rule.id) }),
+            hasStock && btn('Склад', { kind: 'secondary', size: 'sm', icon: 'box', onClick: () => openStock(rule) }),
             h('span', { class: 'grow' }),
             btn('Удалить', { kind: 'ghost-danger', size: 'sm', icon: 'trash', onClick: () => remove(rule) }),
           ),
@@ -156,11 +284,12 @@
 
     async function move(rule, direction) {
       try {
-        const result = await api('move_rule', rule.id, direction);
+        const result = await api('move_rule', rule.id, direction, rule);
         rules = result.items || [];
         render({ id: rule.id + direction, dir: direction });
         noteRestart(result);
       } catch (exc) {
+        isStale(exc);
         toast.error('Не удалось переместить правило', { text: exc.message });
       }
     }
@@ -169,19 +298,22 @@
       const ok = await confirmDialog({
         title: `Удалить правило «${rule.match}»?`,
         text: rule.stock_file
-          ? `Файл склада ${rule.stock_file} останется на диске — его можно подключить к новому правилу.`
+          ? `Бот перестанет выдавать товар по этому правилу. Файл склада ${rule.stock_file}` +
+            (rule.stock_count ? ` (${countText(rule.stock_count, GOODS)})` : '') +
+            ' останется в папке stock — товары из него не пропадут.'
           : 'Бот перестанет отправлять сообщение по этому правилу.',
         confirmLabel: 'Удалить',
         danger: true,
       });
       if (!ok) return;
       try {
-        noteRestart(await api('delete_rule', rule.id));
+        noteRestart(await api('delete_rule', rule.id, rule));
         toast.ok('Правило удалено');
         rules = null;
         await load();
         Poller.kick('state');
       } catch (exc) {
+        isStale(exc);
         toast.error('Не удалось удалить правило', { text: exc.message });
       }
     }
@@ -291,15 +423,33 @@
           : h('span', {}, 'Файл склада создастся автоматически в папке stock.'),
       );
       const stockFields = h('div', { class: 'editor__stock-fields', hidden: !form.use_stock }, h('div', { class: 'grid-2' }, perField.el, lowField.el), fileNote);
+      const applyStock = (value) => {
+        form.use_stock = value;
+        stockFields.hidden = !value;
+        messageField.setError('');
+        updatePreview();
+      };
       const stockToggle = toggle({
         checked: form.use_stock,
         id: 'rule-stock',
         label: 'Выдавать товар со склада',
-        onChange: (value) => {
-          form.use_stock = value;
-          stockFields.hidden = !value;
-          messageField.setError('');
-          updatePreview();
+        onChange: async (value) => {
+          const left = rule && rule.stock_file ? rule.stock_count || 0 : 0;
+          if (!value && left > 0) {
+            // Товары не удаляются, но бот перестанет их выдавать — продавец должен это знать.
+            const ok = await confirmDialog({
+              title: 'Выключить склад у правила?',
+              text: `В файле ${rule.stock_file} — ${countText(left, GOODS)}. После сохранения бот перестанет выдавать их по этому правилу: покупатели получат только текст сообщения. Сам файл останется в папке stock.`,
+              confirmLabel: 'Выключить склад',
+              cancelLabel: 'Оставить склад',
+              danger: true,
+            });
+            if (!ok) {
+              stockToggle.input.checked = true;
+              return;
+            }
+          }
+          applyStock(value);
         },
       });
       const formError = h('div', { class: 'form-error', role: 'alert', hidden: true });
@@ -378,14 +528,26 @@
         };
         let result;
         try {
-          result = await api('save_rule', payload, isNew ? null : rule.id);
+          result = isNew ? await api('save_rule', payload, null) : await api('save_rule', payload, rule.id, rule);
         } catch (exc) {
-          showServerError(exc.message);
+          if (isStale(exc)) {
+            formError.textContent = `${exc.message} Закройте окно — список правил уже обновлён.`;
+            formError.hidden = false;
+          } else showServerError(exc.message);
           return;
         }
         noteRestart(result);
         entry.close(true);
-        toast.ok(isNew ? 'Правило создано' : 'Правило сохранено');
+        const item = result && result.item;
+        if (result && result.reused_stock && item) {
+          // Склад с таким именем уже лежал в папке stock — правило получило его товары, а не пустой файл.
+          toast.ok(isNew ? 'Правило создано' : 'Правило сохранено', {
+            text: `Подключён склад ${item.stock_file}: в нём уже ${countText(item.stock_count || 0, GOODS)}.`,
+            timeout: 9000,
+          });
+        } else {
+          toast.ok(isNew ? 'Правило создано' : 'Правило сохранено');
+        }
         rules = null;
         await load();
         Poller.kick('state');
@@ -436,9 +598,14 @@
 
     /* -------------------------------------------------------------- Склад */
 
-    function openStock(ruleId) {
-      const rule = (rules || []).find((item) => item.id === ruleId);
+    /**
+     * Склад правила. rule — правило из list_rules: оно уходит в каждый вызов
+     * как expected, и бэкенд откажет, если по этому номеру уже другое правило.
+     */
+    function openStock(rule) {
+      const ruleId = rule.id;
       let stock = null;
+      let drawer = null;
       let reveal = false;
 
       const summary = h('div', { class: 'stock__summary' });
@@ -473,9 +640,9 @@
           return;
         }
         const reader = new FileReader();
-        reader.onload = () => withBusy(uploadBtn, () => add(String(reader.result || '').replace(/^﻿/, ''), false, file.name));
+        reader.onload = () => withBusy(uploadBtn, () => addFile(reader.result, file.name));
         reader.onerror = () => toast.error('Не удалось прочитать файл', { text: file.name });
-        reader.readAsText(file, 'utf-8');
+        reader.readAsArrayBuffer(file);
       });
 
       const body = h(
@@ -489,14 +656,18 @@
           { class: 'stock__add' },
           h('h3', { class: 'sheet-section__title' }, 'Добавить товары'),
           area,
-          h('p', { class: 'field__hint' }, 'Каждая строка — отдельный товар. Многострочный товар запишите в одну строку через \\n — покупатель получит его с переносами.'),
+          h(
+            'p',
+            { class: 'field__hint' },
+            'Каждая строка — отдельный товар. Если вставить товар в несколько строк (логин, пароль, почта), SupplierHub предложит объединить их в один товар.',
+          ),
           h('div', { class: 'stock__add-actions' }, uploadBtn, fileInput, h('span', { class: 'grow' }), addBtn),
         ),
       );
 
-      openDrawer({
+      drawer = openDrawer({
         title: 'Склад',
-        subtitle: rule ? `«${rule.match}»` : `Правило №${ruleId + 1}`,
+        subtitle: `«${rule.match}»`,
         lead: gtile('rect', 'white', 36),
         body,
         wide: true,
@@ -504,7 +675,7 @@
 
       function renderSummary() {
         const count = stock.count;
-        const tone = !rule ? 'neutral' : count === 0 ? 'danger' : count <= rule.low_stock_alert ? 'warning' : 'success';
+        const tone = count === 0 ? 'danger' : count <= rule.low_stock_alert ? 'warning' : 'success';
         replace(
           summary,
           h(
@@ -518,7 +689,7 @@
             { class: 'stock__file' },
             icon('file', 15),
             h('code', { class: 'mono', title: stock.file }, stock.file),
-            rule && h('span', { class: 'stock__per' }, `${rule.products_per_sale} за продажу · порог ${rule.low_stock_alert}`),
+            h('span', { class: 'stock__per' }, `${rule.products_per_sale} за продажу · порог ${rule.low_stock_alert}`),
           ),
         );
         clearBtn.disabled = !count;
@@ -545,15 +716,44 @@
         );
       }
 
+      /** Правила поменялись в обход окна: склад по этому номеру уже чужой — закрываем панель. */
+      function stale(exc) {
+        if (!isStale(exc)) return false;
+        drawer.close(true);
+        return true;
+      }
+
       async function reload() {
         try {
-          stock = await api('get_stock', ruleId);
+          stock = await api('get_stock', ruleId, rule);
         } catch (exc) {
-          replace(items, h('li', {}, callout('danger', 'Не удалось открыть склад', exc.message)));
+          if (stale(exc)) toast.error('Склад закрыт', { text: exc.message });
+          else replace(items, h('li', {}, callout('danger', 'Не удалось открыть склад', exc.message)));
           return;
         }
         renderSummary();
         renderItems();
+      }
+
+      async function addFile(buffer, fileName) {
+        const { text, encoding } = decodeGoodsFile(buffer);
+        if (text.includes('\u0000')) {
+          toast.error('Это не текстовый файл', { text: `${fileName}: сохраните товары в Блокноте как .txt в кодировке UTF-8.` });
+          return;
+        }
+        if (encoding === 'windows-1251' && goodsLines(text).length) {
+          const lines = goodsLines(text);
+          const choice = await choiceDialog({
+            title: 'Проверьте текст из файла',
+            text: `Файл ${fileName} сохранён не в UTF-8, а в кодировке Windows-1251 («ANSI»). Убедитесь, что русские буквы ниже читаются нормально — именно так товар получат покупатели.`,
+            listTitle: `В файле ${countText(lines.length, GOODS)}:`,
+            products: lines,
+            choices: [{ value: 'add', label: 'Текст читается — добавить', kind: 'primary' }],
+            tone: 'warning',
+          });
+          if (choice !== 'add') return;
+        }
+        await add(text, false, fileName);
       }
 
       async function add(text, fromArea, fileName) {
@@ -561,31 +761,84 @@
           toast.warn(fileName ? 'Файл пустой' : 'Нечего добавлять', { text: 'Нужны товары — по одному в строке.' });
           return;
         }
+        if (text.includes('\uFFFD')) {
+          toast.error('В тексте есть испорченные символы «\uFFFD»', {
+            text: 'Похоже, файл уже сохраняли в неправильной кодировке. Исправьте товары и сохраните файл в UTF-8.',
+          });
+          return;
+        }
+        let payload = text;
+        const groups = productGroups(text);
+        if (groups) {
+          const lines = goodsLines(text).length;
+          const choice = await choiceDialog({
+            title: groups.length === 1 ? 'Это один товар?' : `Это ${countText(groups.length, GOODS)}?`,
+            text:
+              'Каждая строка склада — отдельный товар: если добавить как есть, разные покупатели получат по одной строке — например, один только логин, другой только пароль. ' +
+              'Объедините строки, и каждый покупатель получит свой товар целиком, с переносами.',
+            listTitle: `После объединения — ${countText(groups.length, GOODS)}:`,
+            products: joinGroups(groups).split('\n'),
+            choices: [
+              { value: 'split', label: `Нет, ${countText(lines, GOODS)}`, kind: 'secondary' },
+              { value: 'join', label: groups.length === 1 ? 'Объединить в один товар' : `Объединить в ${countText(groups.length, GOODS)}`, kind: 'primary' },
+            ],
+          });
+          if (!choice) return;
+          if (choice === 'join') payload = joinGroups(groups);
+        }
         try {
-          const result = await api('add_stock', ruleId, text);
+          const result = await api('add_stock', ruleId, payload, rule);
           if (fromArea) area.value = '';
           toast.ok(result.added ? `Добавлено: ${countText(result.added, GOODS)}` : 'Новых товаров нет', {
             text: `${fileName ? `Из файла ${fileName}. ` : ''}Теперь на складе ${countText(result.count, GOODS)}.`,
           });
         } catch (exc) {
+          stale(exc);
           toast.error('Не удалось добавить товары', { text: exc.message });
           return;
         }
-        await reload();
-        load();
-        Poller.kick('state');
+        await refreshAll();
       }
 
       async function removeItem(index, value) {
         try {
-          const result = await api('remove_stock_item', ruleId, index, value);
-          if (result.removed) toast.ok('Товар удалён');
-          else toast.warn('Склад изменился', { text: 'Похоже, бот только что выдал этот товар — список обновлён.' });
+          const result = await api('remove_stock_item', ruleId, index, value, rule);
+          if (result.removed) {
+            // Удаляется одним нажатием, а в скрытом списке не видно, что именно, — даём вернуть.
+            toast.ok(`Товар №${index + 1} удалён`, {
+              timeout: 10000,
+              action: { label: 'Отменить', onClick: () => restoreItem(value) },
+            });
+          } else {
+            toast.warn('Склад изменился', { text: 'Похоже, бот только что выдал этот товар — список обновлён.' });
+          }
         } catch (exc) {
+          if (stale(exc)) {
+            toast.error('Товар не удалён', { text: exc.message });
+            return;
+          }
           toast.error('Не удалось удалить товар', { text: exc.message });
         }
-        await reload();
-        load();
+        await refreshAll();
+      }
+
+      async function restoreItem(value) {
+        try {
+          const result = await api('add_stock', ruleId, value, rule);
+          toast.ok('Товар возвращён на склад', { text: `Он добавлен в конец списка. Теперь на складе ${countText(result.count, GOODS)}.` });
+        } catch (exc) {
+          if (stale(exc)) {
+            toast.error('Товар не возвращён', { text: `${exc.message} Добавьте его заново: ${value}` });
+            return;
+          }
+          toast.error('Не удалось вернуть товар', { text: exc.message });
+        }
+        await refreshAll();
+      }
+
+      async function refreshAll() {
+        if (!drawer.closed) await reload();
+        if (ctx.alive) load();
         Poller.kick('state');
       }
 
@@ -598,14 +851,16 @@
         });
         if (!ok) return;
         try {
-          const result = await api('clear_stock', ruleId);
+          const result = await api('clear_stock', ruleId, rule);
           toast.ok(`Склад очищен: удалено ${countText(result.removed, GOODS)}`);
         } catch (exc) {
+          if (stale(exc)) {
+            toast.error('Склад не очищен', { text: exc.message });
+            return;
+          }
           toast.error('Не удалось очистить склад', { text: exc.message });
         }
-        await reload();
-        load();
-        Poller.kick('state');
+        await refreshAll();
       }
 
       replace(items, h('li', { class: 'stock-items__loading' }, h('span', { class: 'spinner spinner--lg' })));
@@ -639,14 +894,14 @@
 
     ctx.on('overview', (ov) => {
       renderBanner(ov);
-      if (restartHint.childElementCount && (ov.bot.status !== 'running' || ov.bot.started_at !== hintStartedAt)) {
-        replace(restartHint);
-      }
+      renderRestartHint();
       const total = ov.stats.stock_total;
       if (lastStockTotal !== null && total !== lastStockTotal) load();
       lastStockTotal = total;
     });
+    ctx.on('restart', renderRestartHint);
     renderBanner(App.overview);
+    renderRestartHint();
     const loaded = load();
 
     return {
@@ -665,7 +920,12 @@
         } else if (params.has('stock')) {
           const id = Number(params.get('stock'));
           history.replaceState(null, '', '#/delivery');
-          loaded.then(() => ctx.alive && Number.isInteger(id) && openStock(id));
+          loaded.then(() => {
+            if (!ctx.alive) return;
+            const rule = (rules || []).find((item) => item.id === id);
+            if (rule && rule.stock_file) openStock(rule);
+            else toast.error('Склад не найден', { text: 'Правила изменились — выберите склад в списке.' });
+          });
         }
       },
     };

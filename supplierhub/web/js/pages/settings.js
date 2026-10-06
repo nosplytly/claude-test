@@ -326,6 +326,14 @@
               btn('Файл журнала', { kind: 'ghost', icon: 'file', onClick: () => openPath('log') }),
             ),
             h('p', { class: 'about' }, `SupplierHub ${App.info ? App.info.version : ''} · работает ${modeLabel}`),
+            // В браузере закрыть вкладку мало: приложение и бот продолжат работать в фоне.
+            isBrowserMode() &&
+              h(
+                'div',
+                { class: 'quit-row' },
+                h('p', { class: 'field__hint' }, 'Вкладку браузера можно закрыть — бот продолжит работу. Чтобы выключить и бота, и SupplierHub, нажмите «Выйти».'),
+                btn('Выйти из SupplierHub', { kind: 'ghost-danger', icon: 'close', onClick: () => quitApp() }),
+              ),
           ],
         }),
       ];

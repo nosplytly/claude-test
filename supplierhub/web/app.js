@@ -32,6 +32,8 @@ const App = {
   route: null,
   page: null,
   failures: 0,
+  /** started_at запуска, которому нужен перезапуск после правок из этого окна (см. noteRestart). */
+  restartFor: null,
   els: {},
 };
 
@@ -41,6 +43,55 @@ function botState(status) {
 
 function botStatus() {
   return (App.overview && App.overview.bot && App.overview.bot.status) || 'stopped';
+}
+
+/**
+ * Бот работает, но не может делать своё дело: Playerok не принимает токен,
+ * нет связи или не сохраняется state.json. Статус при этом «running» —
+ * без этой проверки интерфейс показывал бы зелёное «Бот работает».
+ */
+function botProblem(ov = App.overview) {
+  const bot = ov && ov.bot;
+  return bot && bot.status === 'running' && bot.problem ? bot.problem : null;
+}
+
+const PROBLEMS = {
+  auth: { title: 'Playerok не принимает токен', short: 'Токен не принят' },
+  network: { title: 'Нет связи с Playerok', short: 'Нет связи с Playerok' },
+  state: { title: 'Бот не может сохранить данные', short: 'Ошибка файла state.json' },
+};
+
+function problemInfo(problem) {
+  return PROBLEMS[problem.kind] || { title: 'Бот работает с ошибками', short: 'Есть проблема' };
+}
+
+/*
+ * Перезапуск нужен, если работающему боту поменяли настройки, которые он
+ * читает только при запуске. Об этом говорит бэкенд (bot.restart_required),
+ * а результат сохранения из этого окна запоминаем сами — на случай старого
+ * бэкенда. Подсказка общая для всех страниц и живёт до перезапуска.
+ */
+const RESTART_PENDING = 'starting';
+
+function noteRestart(result) {
+  if (!result || !result.restart_required) return;
+  const bot = App.overview && App.overview.bot;
+  App.restartFor = (bot && bot.status === 'running' && bot.started_at) || RESTART_PENDING;
+  Bus.emit('restart', true);
+}
+
+function trackRestart(ov) {
+  if (!App.restartFor) return;
+  const { status, started_at: startedAt } = ov.bot;
+  if (status === 'starting') return;
+  if (status !== 'running') App.restartFor = null;
+  else if (App.restartFor === RESTART_PENDING) App.restartFor = startedAt;
+  else if (startedAt !== App.restartFor) App.restartFor = null;
+}
+
+function restartNeeded(ov = App.overview) {
+  if (!ov || !ov.bot || ov.bot.status !== 'running') return false;
+  return Boolean(ov.bot.restart_required || App.restartFor);
 }
 
 function navigate(path) {
@@ -58,7 +109,8 @@ async function botAction(action) {
   try {
     const result = await api(`${action}_bot`);
     if (App.overview && result && result.status) {
-      App.overview = { ...App.overview, bot: { ...App.overview.bot, status: result.status, error: null } };
+      App.overview = { ...App.overview, bot: { ...App.overview.bot, status: result.status, error: null, problem: null } };
+      trackRestart(App.overview);
       Bus.emit('overview', App.overview);
     }
     if (action === 'stop') toast.ok('Бот остановлен');
@@ -80,6 +132,7 @@ async function botAction(action) {
 /** Сохранить config.toml и подсказать про перезапуск, если бот работает. */
 async function saveConfig(cfg) {
   const result = await api('save_config', cfg);
+  noteRestart(result);
   if (result && result.restart_required) {
     toast.ok('Настройки сохранены', {
       text: 'Бот работает со старыми настройками — перезапустите его, чтобы применить.',
@@ -128,6 +181,7 @@ async function refreshState() {
     }
   }
   App.overview = overview;
+  trackRestart(overview);
   Bus.emit('overview', overview);
 }
 
@@ -178,7 +232,15 @@ function buildShell() {
     nav,
     h('div', { class: 'sidebar__spacer' }),
     botBox,
-    h('div', { class: 'sidebar__foot' }, h('span', {}, 'SupplierHub'), h('span', {}, version)),
+    h(
+      'div',
+      { class: 'sidebar__foot' },
+      h('span', {}, 'SupplierHub'),
+      // В браузере нет окна, которое можно закрыть: без этой кнопки приложение и бот остались бы висеть в фоне.
+      isBrowserMode()
+        ? h('button', { type: 'button', class: 'sidebar__quit', title: 'Остановить бота и закрыть SupplierHub', onClick: () => quitApp() }, icon('close', 13), 'Выйти')
+        : h('span', {}, version),
+    ),
   );
   const offline = h('div', { class: 'offline', role: 'status', hidden: true });
   const main = h('main', { class: 'main', id: 'main', tabindex: '-1' }, offline, h('div', { class: 'main__page' }));
@@ -195,7 +257,10 @@ function renderChrome() {
   const attention = ov && ov.stats ? ov.stats.attention : 0;
   const low = ov && ov.low_stock ? ov.low_stock.length : 0;
   const username = ov && ov.account ? ov.account.username : '';
-  const key = JSON.stringify([status, minutes, attention, low, username, App.botBusy]);
+  const hasToken = !(ov && ov.setup && !ov.setup.token);
+  const problem = botProblem(ov);
+  const restart = restartNeeded(ov);
+  const key = JSON.stringify([status, minutes, attention, low, username, App.botBusy, hasToken, problem && problem.kind, restart]);
   if (key === chromeKey) return;
   chromeKey = key;
 
@@ -211,28 +276,87 @@ function renderChrome() {
   // Пока бот входит в аккаунт, его можно остановить: вход может долго висеть на сети.
   const busy = App.botBusy || status === 'stopping';
   const active = status === 'running' || status === 'starting';
-  let sub = 'Не запущен';
-  if (status === 'running') sub = [username, fmtDuration(ov.bot.uptime_sec, true)].filter(Boolean).join(' · ') || 'В работе';
+  let title = st.short;
+  let tone = st.tone;
+  let sub = hasToken ? 'Не запущен' : 'Нужен токен Playerok';
+  if (problem) {
+    title = 'Не работает';
+    tone = 'warning';
+    sub = problemInfo(problem).short;
+  } else if (status === 'running') sub = [username, fmtDuration(ov.bot.uptime_sec, true)].filter(Boolean).join(' · ') || 'В работе';
   else if (status === 'starting') sub = 'Вход в Playerok…';
   else if (status === 'stopping') sub = 'Завершаем задачи…';
   else if (status === 'error') sub = 'Причина — на главной';
-  else if (username) sub = username;
+  else if (username && hasToken) sub = username;
 
-  const action = active
-    ? btn('Остановить', { kind: 'secondary', icon: busy ? null : 'stop', size: 'sm', disabled: busy, onClick: () => botAction('stop'), cls: 'botbox__btn' })
-    : btn('Запустить', { kind: 'primary', icon: busy ? null : 'play', size: 'sm', disabled: busy, onClick: () => botAction('start'), cls: 'botbox__btn' });
+  // Без токена «Запустить» закончился бы ошибкой — сразу ведём туда, где его вписать.
+  let action;
+  if (active) {
+    action = btn('Остановить', { kind: 'secondary', icon: busy ? null : 'stop', size: 'sm', disabled: busy, onClick: () => botAction('stop'), cls: 'botbox__btn' });
+  } else if (!hasToken) {
+    action = btn('Указать токен', { kind: 'primary', icon: busy ? null : 'key', size: 'sm', disabled: busy, onClick: () => navigate('settings?focus=token'), cls: 'botbox__btn' });
+  } else {
+    action = btn('Запустить', { kind: 'primary', icon: busy ? null : 'play', size: 'sm', disabled: busy, onClick: () => botAction('start'), cls: 'botbox__btn' });
+  }
   if (busy) action.prepend(h('span', { class: 'spinner', 'aria-hidden': 'true' }));
+
+  // Подсказка о перезапуске видна на любой странице, пока бот не перезапущен.
+  const restartBox =
+    restart &&
+    !busy &&
+    h(
+      'div',
+      { class: 'botbox__restart', role: 'status' },
+      h('span', { class: 'botbox__restart-text' }, icon('alert', 14), 'Бот работает со старыми настройками'),
+      btn('Перезапустить', { kind: 'primary', size: 'sm', icon: 'restart', onClick: () => botAction('restart'), cls: 'botbox__btn' }),
+    );
 
   replace(
     App.els.botBox,
     h(
       'div',
       { class: 'botbox__status' },
-      h('span', { class: ['dot', `dot--${st.tone}`, status === 'running' && 'dot--pulse'], 'aria-hidden': 'true' }),
-      h('div', { class: 'botbox__text' }, h('div', { class: 'botbox__title' }, st.short), h('div', { class: 'botbox__sub', title: sub }, sub)),
+      h('span', { class: ['dot', `dot--${tone}`, status === 'running' && !problem && 'dot--pulse'], 'aria-hidden': 'true' }),
+      h('div', { class: 'botbox__text' }, h('div', { class: 'botbox__title' }, title), h('div', { class: 'botbox__sub', title: sub }, sub)),
     ),
+    restartBox,
     action,
   );
+}
+
+/* ------------------------------------------------------------- Выход */
+
+function isBrowserMode() {
+  return Boolean(App.info && App.info.mode === 'browser');
+}
+
+/** Остановить бота и закрыть приложение (в режиме браузера окна, которое можно закрыть, нет). */
+async function quitApp() {
+  const running = ['running', 'starting'].includes(botStatus());
+  const ok = await confirmDialog({
+    title: 'Выйти из SupplierHub?',
+    text: running
+      ? 'Бот остановится и перестанет выдавать товар, пока вы снова не запустите SupplierHub.'
+      : 'SupplierHub закроется. Чтобы вернуться, запустите его ярлыком.',
+    confirmLabel: running ? 'Остановить и выйти' : 'Выйти',
+    danger: running,
+  });
+  if (!ok) return;
+  try {
+    await api('quit_app');
+  } catch (exc) {
+    toast.error('Не удалось закрыть SupplierHub', { text: exc.message });
+    return;
+  }
+  Poller.stop('state');
+  Layers.closeAll();
+  if (App.page) App.page.teardown();
+  App.page = null;
+  showFatal('Бот остановлен. Эту вкладку можно закрыть, а чтобы вернуться, запустите SupplierHub ярлыком.', {
+    title: 'SupplierHub закрыт',
+    retry: false,
+    art: 'stopped',
+  });
 }
 
 function markActiveNav() {
@@ -347,17 +471,18 @@ function mountPage(target, params) {
 
 /* ---------------------------------------------------------------- Старт */
 
-function showFatal(message) {
+/** Экран вместо интерфейса: нет связи, устаревшая ссылка или приложение закрыто. */
+function showFatal(message, { title = 'Не удалось подключиться', retry = true, art = 'error' } = {}) {
   const host = document.getElementById('app');
   replace(
     host,
     h(
       'div',
-      { class: 'splash splash--error' },
-      logoArt('error', 34),
-      h('h1', { class: 'splash__title' }, 'Не удалось подключиться'),
+      { class: ['splash', 'splash--message', art === 'error' && 'splash--error'] },
+      logoArt(art, 34),
+      h('h1', { class: 'splash__title' }, title),
       h('p', { class: 'splash__text' }, message),
-      btn('Повторить', { kind: 'primary', icon: 'restart', onClick: () => location.reload() }),
+      retry && btn('Повторить', { kind: 'primary', icon: 'restart', onClick: () => location.reload() }),
     ),
   );
 }
@@ -366,13 +491,14 @@ async function boot() {
   try {
     App.info = await api('get_app_info');
   } catch (exc) {
-    showFatal(exc.message);
+    showFatal(exc.message, exc.final ? { title: exc.title, retry: false } : {});
     return;
   }
   buildShell();
   document.body.classList.add('is-ready');
   Bus.on('overview', renderChrome);
   Bus.on('bot-busy', renderChrome);
+  Bus.on('restart', renderChrome);
   await refreshState();
   renderChrome();
   Poller.start('state', refreshState, 2000, 2000);

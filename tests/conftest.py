@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import pytest
 from PlayerokAPI import Deal, Event, Item, ItemProfile, Page
 
+from playerok_bot import fileio
 from playerok_bot.config import DeliveryConfig, DeliveryRule, RelistConfig
 from playerok_bot.storage import State
 
@@ -167,3 +169,36 @@ def delivery_config(stock_file: Path) -> DeliveryConfig:
 @pytest.fixture
 def relist_config() -> RelistConfig:
     return RelistConfig(after_sale=True, expired=True)
+
+
+@pytest.fixture(autouse=True)
+def _fast_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Повторы записи занятого файла в тестах — без пауз."""
+    monkeypatch.setattr(fileio, "RETRY_DELAYS", (0.0,) * len(fileio.RETRY_DELAYS))
+
+
+class FlakyReplace:
+    """os.replace, который падает как на Windows, когда файл держит другая программа.
+
+    `failing` — падать на каждом вызове; `fail_next` — упасть ещё столько раз;
+    `only` — падать только для файла с этим именем.
+    """
+
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, *, failing: bool = True, only: str | None = None
+    ) -> None:
+        self.calls = 0
+        self.failing = failing
+        self.fail_next = 0
+        #: Падать только при подмене файла с таким именем (например, state.json).
+        self.only = only
+        self._real = os.replace
+        monkeypatch.setattr(fileio.os, "replace", self)
+
+    def __call__(self, src, dst) -> None:
+        self.calls += 1
+        target = os.path.basename(os.fspath(dst))
+        if (self.failing or self.fail_next > 0) and self.only in (None, target):
+            self.fail_next = max(self.fail_next - 1, 0)
+            raise PermissionError(13, "Отказано в доступе", str(dst))
+        self._real(src, dst)

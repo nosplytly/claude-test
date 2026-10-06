@@ -293,6 +293,7 @@ const DELIVERY_TONES = {
   failed: 'danger',
   no_rule: 'muted',
   skipped: 'muted',
+  manual: 'neutral',
 };
 
 function chip(text, tone = 'muted', { dot = true, cls } = {}) {
@@ -367,7 +368,12 @@ async function openUrl(url) {
   try {
     await api('open_url', url);
   } catch (exc) {
-    toast.error('Не удалось открыть ссылку', { text: exc.message });
+    // Совет «скопируйте ссылку» бесполезен, если её нигде не видно, — показываем и даём скопировать.
+    toast.error('Не удалось открыть ссылку', {
+      text: [exc.message, h('span', { class: 'toast__url' }, url)],
+      action: { label: 'Копировать ссылку', onClick: () => copyText(url, 'Ссылка скопирована') },
+      timeout: 15000,
+    });
   }
 }
 
@@ -632,9 +638,10 @@ function saveBar({ onSave, onReset, text = 'Есть несохранённые 
   }
   return {
     el,
+    /** Вызывается при каждой правке: старая ошибка («Исправьте поля») больше не верна. */
     show(visible) {
       el.hidden = !visible;
-      if (!visible) setError('');
+      setError('');
     },
     setError,
   };

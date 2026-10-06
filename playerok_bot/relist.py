@@ -30,12 +30,27 @@ _SOLD = frozenset({ItemStatus.SOLD, ItemStatus.EXPIRED})
 _COOLDOWN = timedelta(hours=12)
 #: Сколько раз проверить лот после продажи, прежде чем решить, что он ещё в продаже.
 _SALE_CHECKS = 3
+#: Статус лота после публикации — по-русски для уведомления.
+_STATUS_LABELS = {
+    ItemStatus.PENDING_MODERATION: "на модерации",
+    ItemStatus.PENDING_APPROVAL: "на модерации",
+    ItemStatus.APPROVED: "активен",
+    ItemStatus.DRAFT: "черновик",
+    ItemStatus.DECLINED: "отклонён модерацией",
+    ItemStatus.BLOCKED: "заблокирован",
+    ItemStatus.PENDING_STATUS_PAYMENT: "ждёт оплаты тарифа",
+}
 
 
 class AutoRelist:
     """Публикует лот заново на бесплатном тарифе (DEFAULT).
 
     Платное поднятие (PREMIUM/VIP) бот не покупает, чтобы не тратить баланс.
+
+    После продажи перевыставляются только лоты, которые бот выдаёт сам
+    (`auto_delivered`): лот без правила — скорее всего, уникальный товар,
+    и второй покупатель заплатил бы за то, чего уже нет. Такой лот
+    перевыставляется, только если продавец явно назвал его в `relist.match`.
     """
 
     def __init__(
@@ -46,6 +61,8 @@ class AutoRelist:
         state: State,
         notifier: Notifier,
         can_sell: Callable[[str | None], bool],
+        *,
+        auto_delivered: Callable[[str | None], bool] | None = None,
     ) -> None:
         self._account = account
         self._me_id = me_id
@@ -53,6 +70,7 @@ class AutoRelist:
         self._state = state
         self._notifier = notifier
         self._can_sell = can_sell
+        self._auto_delivered = auto_delivered
         self._lock = asyncio.Lock()
 
     def skip(self, deal: Deal) -> None:
@@ -70,6 +88,18 @@ class AutoRelist:
             name = deal.item.name
             if not self._config.matches(name):
                 self._state.put(DEALS, deal.id, result="not_matched")
+                return
+            if (
+                self._auto_delivered is not None
+                and not self._config.match
+                and not self._auto_delivered(name)
+            ):
+                self._state.put(DEALS, deal.id, result="manual")
+                logger.info(
+                    "Лот «%s» без правила автовыдачи — после продажи не перевыставляю "
+                    "(чтобы перевыставлять его, добавьте название в relist.match)",
+                    name,
+                )
                 return
             if not self._can_sell(name):
                 self._state.put(DEALS, deal.id, result="no_stock")
@@ -94,13 +124,17 @@ class AutoRelist:
                 )
                 return
             ok = await self._publish(item.id, name)
-            self._state.put(DEALS, deal.id, result="ok" if ok else "error", item_id=item.id)
+            # Лот уже опубликован: запись не должна сорваться, иначе следующий
+            # опрос выставил бы копию ещё раз.
+            self._state.record(DEALS, deal.id, result="ok" if ok else "error", item_id=item.id)
 
     async def run_expired(self) -> None:
         """Периодически перевыставлять лоты с истёкшим сроком."""
         while True:
             try:
-                await self.relist_expired()
+                # Флажок могли выключить в настройках, пока бот работает.
+                if self._config.expired:
+                    await self.relist_expired()
             except Exception as exc:
                 logger.warning("Проверка истёкших лотов не удалась: %s", exc)
             await asyncio.sleep(self._config.interval_minutes * 60)
@@ -141,13 +175,15 @@ class AutoRelist:
             item = await self._account.items.publish(item_id)
         except Exception as exc:
             logger.warning("Лот %s: перевыставить не удалось: %s", item_id, exc)
-            self._state.put(ITEMS, item_id, error=str(exc))
+            self._state.record(ITEMS, item_id, error=str(exc))
             await self._notifier.send(f"⚠️ Не удалось перевыставить лот «{title}»: {esc(exc)}")
             return False
         replaced_by = item.id if item.id and item.id != item_id else None
-        self._state.put(
+        self._state.record(
             ITEMS, item_id, status=str(item.status), replaced_by=replaced_by, error=None
         )
         logger.info("Лот %s перевыставлен, статус %s", item_id, item.status)
-        await self._notifier.send(f"🔁 Лот «{title}» снова в продаже (статус: {esc(item.status)})")
+        label = _STATUS_LABELS.get(item.status) if item.status is not None else None
+        suffix = f" ({label})" if label else ""
+        await self._notifier.send(f"🔁 Лот «{title}» снова в продаже{suffix}")
         return True

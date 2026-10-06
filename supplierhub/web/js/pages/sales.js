@@ -2,9 +2,15 @@
 /* Продажи: живые сделки и история выдач, фильтры, поиск и карточка сделки. */
 
 (() => {
+  /** Нужна ли сделке помощь продавца. Бэкенд считает это сам (sale.attention) — так же, как счётчик на главной. */
+  function needsAttention(sale) {
+    if (typeof sale.attention === 'boolean') return sale.attention;
+    return Boolean(sale.delivery) && ['failed', 'no_stock'].includes(sale.delivery.status);
+  }
+
   const FILTERS = {
     all: () => true,
-    attention: (sale) => Boolean(sale.delivery) && ['failed', 'no_stock'].includes(sale.delivery.status),
+    attention: needsAttention,
     delivered: (sale) => Boolean(sale.delivery) && sale.delivery.status === 'delivered',
     no_rule: (sale) => Boolean(sale.delivery) && sale.delivery.status === 'no_rule',
   };
@@ -38,18 +44,85 @@
     return h('div', { class: 'kv__row' }, h('dt', { class: 'kv__key' }, label), h('dd', { class: 'kv__value' }, value, extra));
   }
 
+  /** Действия над сделкой (mark_handled, retry_delivery) — после них обновляем список и счётчики. */
+  async function dealAction(button, method, sale, done, onDone) {
+    await withBusy(button, async () => {
+      try {
+        await api(method, sale.deal_id);
+      } catch (exc) {
+        toast.error(method === 'mark_handled' ? 'Не удалось отметить сделку' : 'Не удалось выдать товар', { text: exc.message });
+        return;
+      }
+      toast.ok(done);
+      Poller.kick('state');
+      Poller.kick('page:sales');
+      onDone();
+    });
+  }
+
+  /** «Выдано вручную»: сделка уходит из «Требуют внимания», бот её больше не трогает. */
+  function handledButton(sale, close) {
+    const button = btn('Отметить: выдано вручную', {
+      kind: 'secondary',
+      size: 'sm',
+      icon: 'check',
+      onClick: async () => {
+        const ok = await confirmDialog({
+          title: 'Отметить, что товар выдан вручную?',
+          text: 'Бот больше не будет выдавать товар по этой сделке, даже если пополнить склад, и она пропадёт из «Требуют внимания». Отмечайте, когда покупатель уже получил товар или деньги вернули.',
+          confirmLabel: 'Отметить',
+        });
+        if (ok) dealAction(button, 'mark_handled', sale, 'Сделка отмечена: выдано вручную', close);
+      },
+    });
+    return button;
+  }
+
+  /** Повторная выдача ботом (ошибка отправки или правило появилось после оплаты). */
+  function retryButton(sale, close, { label, text }) {
+    const button = btn(label, {
+      kind: 'primary',
+      size: 'sm',
+      icon: 'send',
+      onClick: async () => {
+        const ok = await confirmDialog({
+          title: `${label}?`,
+          text: `${text} Если вы уже выдали товар вручную, не повторяйте — отметьте «Выдано вручную», иначе покупатель получит товар дважды.`,
+          confirmLabel: label,
+        });
+        if (ok) dealAction(button, 'retry_delivery', sale, 'Бот выдаёт товар — статус обновится через пару секунд', close);
+      },
+    });
+    return button;
+  }
+
   /** Боковая панель со всеми подробностями сделки. */
   function openSale(sale) {
     const delivery = sale.delivery;
     const products = (delivery && delivery.products) || [];
     const status = delivery ? delivery.status : null;
+    let drawer = null;
+    const close = () => drawer && drawer.close(true);
+    const handled = ['failed', 'no_stock', 'no_rule'].includes(status) && handledButton(sale, close);
 
     let note = null;
     if (status === 'failed') {
-      note = callout('danger', 'Товар не выдан', delivery.error || 'Не удалось отправить сообщение покупателю.');
+      note = callout('danger', 'Товар не выдан', delivery.error || 'Не удалось отправить сообщение покупателю.', [
+        sale.status === 'PAID' &&
+          retryButton(sale, close, { label: 'Повторить выдачу', text: 'Бот снова отправит покупателю в чат тот же товар.' }),
+        handled,
+      ]);
     } else if (status === 'no_stock') {
       note = callout('warning', 'Не хватило товара на складе', 'Пополните склад правила — бот выдаст товар при следующей проверке.', [
         btn('К автовыдаче', { kind: 'secondary', size: 'sm', onClick: () => navigate('delivery') }),
+        handled,
+      ]);
+    } else if (status === 'no_rule' && delivery.rule_available) {
+      // Правило создали уже после оплаты: бот сам к сделке не вернётся, но может выдать по запросу.
+      note = callout('info', 'Правило для этого лота уже есть', 'Сделку оплатили раньше, чем появилось правило, поэтому бот её пропустил. Он может выдать товар по правилу сейчас.', [
+        sale.status === 'PAID' &&
+          retryButton(sale, close, { label: 'Выдать по правилу', text: 'Бот возьмёт товар со склада правила и отправит покупателю в чат.' }),
+        handled,
       ]);
     } else if (status === 'no_rule') {
       note = callout('info', 'Для лота нет правила автовыдачи', 'Выдайте товар вручную в чате или создайте правило для таких лотов.', [
@@ -59,7 +132,10 @@
           icon: 'plus',
           onClick: () => navigate(`delivery?new=1&match=${encodeURIComponent(sale.item || '')}`),
         }),
+        handled,
       ]);
+    } else if (status === 'manual') {
+      note = callout('success', 'Отмечено: выдано вручную', 'Бот не выдаёт товар по этой сделке.');
     } else if (status === 'reserved') {
       note = callout('info', 'Товар отправляется', 'Бот уже взял товар со склада и отправляет его покупателю в чат.');
     } else if (status === 'skipped') {
@@ -112,12 +188,13 @@
         // Для сделок только из истории бот хранит время обработки, а не создания.
         kvRow(sale.status ? 'Создана' : 'Обработана', fmtDateTime(sale.created_at)),
         delivery && delivery.delivered_at && kvRow('Выдано', fmtDateTime(delivery.delivered_at)),
+        delivery && delivery.handled_at && kvRow('Отмечено вручную', fmtDateTime(delivery.handled_at)),
         kvRow('Номер сделки', h('code', { class: 'mono' }, String(sale.deal_id)), iconBtn('copy', 'Копировать номер', () => copyText(String(sale.deal_id)), { cls: 'kv__copy', size: 14 })),
       ),
       productsBlock,
     );
 
-    openDrawer({
+    drawer = openDrawer({
       title: 'Сделка',
       subtitle: sale.created_at ? fmtDateTime(sale.created_at) : `#${shortId(sale.deal_id)}`,
       lead: gtile('ring', 'white', 36),

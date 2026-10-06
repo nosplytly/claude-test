@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING
 from PlayerokAPI import Deal
 
 from .config import DeliveryConfig, DeliveryRule
-from .stock import Stock
+from .stock import Stock, StockError
 from .storage import State, now_iso
 from .telegram import Notifier, esc, link
 
 if TYPE_CHECKING:
     from PlayerokAPI import Account
 
-__all__ = ["AutoDelivery", "render_message"]
+__all__ = ["AutoDelivery", "DeliveryError", "mark_manual", "render_message"]
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +33,20 @@ FAILED = "failed"
 NO_RULE = "no_rule"
 #: Сделка оплачена до первого запуска бота — её не трогаем.
 SKIPPED = "skipped"
-FINAL = frozenset({DELIVERED, FAILED, NO_RULE, SKIPPED})
+#: Продавец сам выдал товар или решил вопрос с покупателем — бот сделку не трогает.
+MANUAL = "manual"
+FINAL = frozenset({DELIVERED, FAILED, NO_RULE, SKIPPED, MANUAL})
+#: Сделки, которые продавец может закрыть вручную («Требуют внимания»).
+RESOLVABLE = frozenset({FAILED, NO_STOCK, NO_RULE})
 
 MAX_ATTEMPTS = 5
 
 _PLACEHOLDER = re.compile(r"\{(product|buyer|item)\}")
+_DEAL_URL = "https://playerok.com/deal/{}"
+
+
+class DeliveryError(Exception):
+    """Действие с выдачей невозможно — сообщение показывается пользователю как есть."""
 
 
 def render_message(template: str, products: list[str], deal: Deal) -> str:
@@ -77,6 +86,10 @@ class AutoDelivery:
             return True
         return Stock(rule.stock_file).count() >= rule.products_per_sale
 
+    def handles(self, item_name: str | None) -> bool:
+        """Выдаёт ли бот этот лот сам (автовыдача включена и есть правило)."""
+        return self._config.enabled and self._config.find_rule(item_name) is not None
+
     def skip(self, deal: Deal, reason: str) -> None:
         """Пометить сделку как не требующую выдачи."""
         self._state.put(SECTION, deal.id, status=SKIPPED, reason=reason, **_meta(deal))
@@ -87,6 +100,32 @@ class AutoDelivery:
             return
         async with self._lock:
             await self._process(deal)
+
+    async def mark_manual(self, deal_id: str) -> dict[str, object]:
+        """Продавец решил вопрос сам: сделка уходит из «Требуют внимания» навсегда."""
+        async with self._lock:
+            return mark_manual(self._state, deal_id)
+
+    async def retry(self, deal: Deal) -> str:
+        """Выдать заново по просьбе продавца: «нет правила» (правило уже есть) или
+        «ошибка выдачи» (тот же отложенный товар). Возвращает новый статус."""
+        if not self._config.enabled:
+            raise DeliveryError("Автовыдача выключена — включите её в настройках.")
+        async with self._lock:
+            entry = self._state.get(SECTION, deal.id) or {}
+            status = entry.get("status")
+            if status == NO_RULE:
+                if self._config.find_rule(_name(deal)) is None:
+                    raise DeliveryError(
+                        "Для этого лота всё ещё нет правила автовыдачи — создайте его."
+                    )
+                self._state.put(SECTION, deal.id, status=None, attempts=0, error=None)
+            elif status == FAILED:
+                self._state.put(SECTION, deal.id, status=RESERVED, attempts=0, error=None)
+            else:
+                raise DeliveryError("Эту сделку повторно выдать нельзя.")
+            await self._process(deal)
+            return str((self._state.get(SECTION, deal.id) or {}).get("status") or "")
 
     async def _process(self, deal: Deal) -> None:
         entry = self._state.get(SECTION, deal.id) or {}
@@ -114,22 +153,83 @@ class AutoDelivery:
         self, deal: Deal, rule: DeliveryRule, status: str | None
     ) -> list[str] | None:
         products: list[str] = []
+        stock: Stock | None = None
+        #: Строки, убранные со склада как уже выданные (о них — уведомление).
+        dropped: list[str] = []
+        used: dict[str, str] = {}
         if rule.stock_file is not None:
-            taken = await Stock(rule.stock_file).take(rule.products_per_sale)
+            stock = Stock(rule.stock_file)
+            used = self._delivered_products(deal.id)
+            taken, dropped = stock.take_unique(rule.products_per_sale, used.__contains__)
             if taken is None:
+                if dropped:
+                    await self._report_reused(rule, dropped, used)
+                self._state.put(SECTION, deal.id, status=NO_STOCK, **_meta(deal))
                 if status != NO_STOCK:
                     await self._notifier.send(
                         f"❗ Закончился товар в <code>{esc(rule.stock_file.name)}</code>: "
                         f"сделка {_ref(deal)} ждёт выдачи. Пополните файл — бот выдаст "
                         "товар при следующей проверке."
                     )
-                self._state.put(SECTION, deal.id, status=NO_STOCK, **_meta(deal))
                 return None
             products = taken
         # Сначала запоминаем выданное, потом отправляем: если бот упадёт между
         # этими шагами, после перезапуска уйдёт тот же товар, а не новый.
-        self._state.put(SECTION, deal.id, status=RESERVED, products=products, **_meta(deal))
+        # Товар уходит покупателю, только когда запись уже на диске. Между
+        # take_unique и этой записью нет ни одного await: остановка бота на
+        # медленном уведомлении не должна унести забранный со склада товар.
+        try:
+            self._state.put(SECTION, deal.id, status=RESERVED, products=products, **_meta(deal))
+        except BaseException:
+            if stock is not None:
+                await self._return_to_stock(stock, deal, products)
+            raise
+        finally:
+            if dropped:
+                await self._report_reused(rule, dropped, used)
         return products
+
+    async def _return_to_stock(self, stock: Stock, deal: Deal, products: list[str]) -> None:
+        """Записать резерв не вышло — вернуть товар на склад, чтобы он не пропал."""
+        try:
+            stock.put_back(products)
+        except (OSError, StockError) as exc:
+            logger.error("Сделка %s: не удалось вернуть товар на склад: %s", deal.id, exc)
+            await self._notifier.send(
+                f"❌ Сделка {_ref(deal)}: не удалось ни сохранить выдачу, ни вернуть товар "
+                f"в <code>{esc(stock.path.name)}</code> ({esc(exc)}). Верните строки в файл "
+                "вручную:\n<code>" + esc("\n".join(products)) + "</code>"
+            )
+        else:
+            logger.warning("Сделка %s: выдача не сохранена, товар возвращён на склад", deal.id)
+
+    def _delivered_products(self, deal_id: str) -> dict[str, str]:
+        """Товары, которые уже уходили покупателям: товар → сделка."""
+        used: dict[str, str] = {}
+        for other_id, entry in self._state.entries(SECTION):
+            products = entry.get("products") if other_id != deal_id else None
+            if isinstance(products, list):
+                for product in products:
+                    if isinstance(product, str):
+                        used.setdefault(product, other_id)
+        return used
+
+    async def _report_reused(
+        self, rule: DeliveryRule, dropped: list[str], used: dict[str, str]
+    ) -> None:
+        deals = list(dict.fromkeys(used[product] for product in dropped if product in used))
+        name = rule.stock_file.name if rule.stock_file else "склада"
+        logger.warning("%s: убрано %s уже выданных или повторяющихся строк", name, len(dropped))
+        refs = ", ".join(link(_DEAL_URL.format(deal_id), deal_id) for deal_id in deals[:5])
+        where = f" (выдавались по сделкам: {refs})" if refs else ""
+        await self._notifier.send(
+            f"⚠️ В <code>{esc(name)}</code> нашлись строки, которые уже выдавались или "
+            f"повторяются{where}: {len(dropped)} шт. Бот убрал их со склада и не выдаёт повторно. "
+            "Так бывает, если файл был открыт в Блокноте, пока бот продавал. Добавляйте товар "
+            "через SupplierHub или остановите бота перед правкой файла. Убранные строки:\n<code>"
+            + esc("\n".join(dropped))
+            + "</code>"
+        )
 
     async def _send(self, deal: Deal, rule: DeliveryRule, products: list[str]) -> None:
         try:
@@ -141,15 +241,21 @@ class AutoDelivery:
             await self._send_failed(deal, products, exc)
             return
 
-        self._state.put(SECTION, deal.id, status=DELIVERED, delivered_at=now_iso(), error=None)
+        # Товар уже у покупателя: запись не должна сорвать уведомление и отметку
+        # «отправлено» — если диск занят, она уйдёт в файл при следующей записи.
+        self._state.record(SECTION, deal.id, status=DELIVERED, delivered_at=now_iso(), error=None)
         logger.info("Сделка %s: товар выдан", deal.id)
 
         text = f"📦 Товар выдан: {_ref(deal)} → {esc(_buyer(deal))}"
         if rule.stock_file is not None:
-            left = Stock(rule.stock_file).count()
-            text += f"\nОсталось в <code>{esc(rule.stock_file.name)}</code>: {left}"
-            if left <= rule.low_stock_alert:
-                text += " — 📉 пора пополнить"
+            try:
+                left = Stock(rule.stock_file).count()
+            except (OSError, StockError) as exc:
+                logger.warning("Не удалось посчитать остаток в %s: %s", rule.stock_file, exc)
+            else:
+                text += f"\nОсталось в <code>{esc(rule.stock_file.name)}</code>: {left}"
+                if left <= rule.low_stock_alert:
+                    text += " — 📉 пора пополнить"
         await self._notifier.send(text)
 
         if self._config.mark_sent:
@@ -184,6 +290,17 @@ class AutoDelivery:
                 f"⚠️ Ошибка выдачи по сделке {_ref(deal)}: {esc(exc)}. "
                 "Повторю при следующей проверке."
             )
+
+
+def mark_manual(state: State, deal_id: str) -> dict[str, object]:
+    """Отметить сделку как решённую продавцом вручную (статус MANUAL)."""
+    entry = state.get(SECTION, deal_id)
+    status = entry.get("status") if entry else None
+    if status == MANUAL:
+        return dict(entry or {})
+    if status not in RESOLVABLE:
+        raise DeliveryError("Эта сделка не требует внимания — отмечать нечего.")
+    return dict(state.put(SECTION, deal_id, status=MANUAL, handled_at=now_iso(), was=status))
 
 
 def _meta(deal: Deal) -> dict[str, object]:

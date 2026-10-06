@@ -1209,6 +1209,21 @@ svg {
   gap: 8px;
 }
 
+/* В узкой панели кнопки — под текстом, иначе текст сжимается в столбик. */
+.drawer .callout {
+  flex-wrap: wrap;
+}
+
+.drawer .callout__body {
+  flex-basis: calc(100% - 42px);
+}
+
+.drawer .callout__actions {
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  padding-left: 42px;
+}
+
 .callout--danger {
   border-color: rgba(255, 77, 94, 0.25);
   background: rgba(255, 77, 94, 0.07);
@@ -1437,12 +1452,62 @@ svg {
   width: 100%;
 }
 
+.botbox__restart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 176, 32, 0.28);
+  border-radius: 12px;
+  background: var(--warning-soft);
+}
+
+.botbox__restart-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--warning-text);
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.35;
+}
+
+.botbox__restart-text .icon {
+  flex: none;
+  margin-top: 1px;
+}
+
 .sidebar__foot {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   padding: 12px 6px 0;
   color: var(--faint);
   font-size: 11.5px;
+}
+
+.sidebar__quit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  margin: -4px -6px -4px 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 560;
+  cursor: pointer;
+  transition:
+    background-color var(--t),
+    color var(--t);
+}
+
+.sidebar__quit:hover {
+  background: var(--danger-soft);
+  color: var(--danger-text);
 }
 
 .main {
@@ -1685,6 +1750,11 @@ svg {
   opacity: 1;
 }
 
+.hero--problem::before {
+  background: radial-gradient(440px 280px at calc(100% - 110px) 42%, rgba(255, 176, 32, 0.14), transparent 70%);
+  opacity: 1;
+}
+
 .hero__main {
   position: relative;
   min-width: 0;
@@ -1712,6 +1782,11 @@ svg {
 .hero__status.tone--danger {
   border-color: rgba(255, 77, 94, 0.28);
   background: var(--danger-soft);
+}
+
+.hero__status.tone--warning {
+  border-color: rgba(255, 176, 32, 0.3);
+  background: var(--warning-soft);
 }
 
 .hero__status.tone--accent {
@@ -1776,6 +1851,34 @@ svg {
 .hero__error .icon {
   margin-top: 2px;
   color: var(--danger);
+}
+
+.hero__error--warning {
+  border-color: rgba(255, 176, 32, 0.3);
+  background: var(--warning-soft);
+  color: #ffd9a0;
+}
+
+.hero__error--warning .icon {
+  color: var(--warning);
+}
+
+.hero__meta-item--warning,
+.hero__meta-item--warning .icon {
+  color: var(--warning-text);
+}
+
+.hero__note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 14px;
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
+.hero__note .icon {
+  flex: none;
 }
 
 .hero__actions {
@@ -3053,6 +3156,65 @@ button.stockbox:hover {
   gap: 8px;
 }
 
+/* Окно выбора при добавлении товаров: пример того, что попадёт на склад. */
+
+.choice {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.choice__text {
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.choice__label {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.choice__list {
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-tile);
+  background: var(--field);
+  list-style: none;
+}
+
+.choice__item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: baseline;
+  padding: 7px 8px;
+  border-radius: 10px;
+}
+
+.choice__item + .choice__item {
+  border-top: 1px solid var(--hairline);
+}
+
+.choice__index {
+  color: var(--faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.choice__value {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.choice__more {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
 /* -------------------------------------------------- Перевыставление */
 
 .split {
@@ -3738,6 +3900,15 @@ body.has-layer .toasts {
   overflow-wrap: anywhere;
 }
 
+.toast__url {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  user-select: all;
+}
+
 .toast__action {
   display: block;
   height: 30px;
@@ -3773,6 +3944,27 @@ body.has-layer .toasts {
 .toast__close:hover {
   background: rgba(255, 255, 255, 0.07);
   color: var(--text);
+}
+
+.quit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 18px;
+  margin-top: 6px;
+  padding-top: 16px;
+  border-top: 1px solid var(--hairline);
+}
+
+.quit-row .field__hint {
+  flex: 1 1 320px;
+  margin: 0;
+}
+
+/* Тосты поднимаются над панелью «Сохранить», иначе закрывают её кнопки. */
+body:has(.savebar:not([hidden])):not(.has-layer) .toasts {
+  bottom: 92px;
 }
 
 /* -------------------------------------------- Панель «Сохранить» */
@@ -3933,7 +4125,7 @@ body.has-layer .toasts {
   font-size: 13.5px;
 }
 
-.splash--error .logo-art {
+.splash--message .logo-art {
   margin-bottom: 14px;
 }
 
@@ -3942,7 +4134,7 @@ body.has-layer .toasts {
   font-weight: 680;
 }
 
-.splash--error .splash__text {
+.splash--message .splash__text {
   max-width: 52ch;
   margin-bottom: 14px;
 }

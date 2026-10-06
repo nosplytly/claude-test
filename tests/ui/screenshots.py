@@ -237,9 +237,122 @@ def capture(session: Session) -> None:
     page.wait_for_selector(".logline")
     session.shot(page, "logs")
     session.close(page)
+
+    capture_fixes(session)
     page = session.open("logs", size=NARROW)
     page.wait_for_selector(".logline")
     session.shot(page, "logs-1040")
+    session.close(page)
+
+
+def capture_fixes(session: Session) -> None:
+    """Состояния после UX-ревью: проблемы бота, перезапуск, выход, склад, сделки."""
+    for problem in ("auth", "network"):
+        page = session.open("home", state=f"running&problem={problem}")
+        session.shot(page, f"home-problem-{problem}")
+        session.close(page)
+    page = session.open("home", state="running&mode=browser")
+    session.shot(page, "home-browser-mode")
+    page.locator(".sidebar__quit").click()
+    page.wait_for_selector(".layer--confirm.is-open")
+    page.wait_for_timeout(300)
+    session.shot(page, "quit-confirm")
+    page.locator(".layer--confirm.is-open").get_by_role("button", name="Остановить и выйти").click()
+    page.wait_for_selector(".splash__title")
+    page.wait_for_selector(".layer", state="detached")
+    session.shot(page, "quit-done")
+    session.close(page)
+
+    # Сохранили настройку, которую бот читает только при запуске: подсказка везде.
+    page = session.open("settings", size=NARROW)
+    page.wait_for_selector("#set-deals-interval")
+    page.locator("#set-deals-interval").fill("25")
+    page.locator(".savebar").get_by_role("button", name="Сохранить").click()
+    page.wait_for_selector(".botbox__restart")
+    page.locator(".nav__item[data-route='home']").click()
+    page.wait_for_timeout(500)
+    session.shot(page, "home-restart-1040")
+    page.locator(".nav__item[data-route='delivery']").click()
+    page.wait_for_timeout(500)
+    session.shot(page, "delivery-restart-1040")
+    session.close(page)
+
+    # Панель «Сохранить» с ошибкой и тост над ней.
+    page = session.open("settings", state="empty", size=NARROW)
+    page.locator("#set-tg-enabled").click(force=True)
+    page.locator(".savebar").get_by_role("button", name="Сохранить").click()
+    page.evaluate("() => toast.error('Не удалось запустить бота', { text: 'Пример ошибки.' })")
+    page.wait_for_timeout(400)
+    session.shot(page, "settings-savebar-toast-1040")
+    session.close(page)
+
+    # Склад: многострочный товар, удаление с отменой, выключение склада.
+    page = session.open("delivery")
+    page.locator(".rule").first.get_by_role("button", name="Склад", exact=True).click()
+    page.wait_for_selector(".layer.is-open .drawer .stock-item")
+    drawer = page.locator(".layer.is-open .drawer")
+    drawer.locator("textarea").fill("Логин: vasya777\nПароль: Qwerty123\nПочта: v@mail.ru")
+    drawer.get_by_role("button", name="Добавить").click()
+    page.wait_for_selector(".layer--modal.is-open .modal")
+    page.wait_for_timeout(400)
+    session.shot(page, "stock-multiline-dialog")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    page.locator(".stock-item").first.hover()
+    page.locator(".stock-item").first.get_by_role("button", name="Удалить товар").click()
+    page.wait_for_selector(".toast .toast__action")
+    page.wait_for_timeout(300)
+    session.shot(page, "stock-delete-undo")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    page.locator(".rule").first.get_by_role("button", name="Редактировать").click()
+    page.wait_for_selector(".layer.is-open .modal")
+    page.locator("#rule-stock").click(force=True)
+    page.wait_for_selector(".layer--confirm.is-open")
+    page.wait_for_timeout(300)
+    session.shot(page, "editor-stock-off-confirm")
+    session.close(page)
+
+    # Сделки: ошибка выдачи с действиями и «правило уже есть».
+    page = session.open("sales")
+    page.wait_for_selector(".table__body .trow")
+    page.evaluate(
+        """() => window.__mock.state.sales.unshift({
+          deal_id: 'late-rule-1', item: 'Ключ Steam — Portal 2', buyer: 'late_buyer', price: 199,
+          status: 'PAID', created_at: new Date().toISOString(), chat_id: 'c-77',
+          delivery: { status: 'no_rule', products: [], error: null, delivered_at: null },
+        })"""
+    )
+    page.get_by_role("button", name="Обновить").click()
+    page.locator(".table__body .trow", has_text="Portal 2").click()
+    page.wait_for_selector(".layer.is-open .drawer")
+    page.wait_for_timeout(400)
+    session.shot(page, "sales-drawer-rule-available")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    page.locator(".table__body .trow", has_text="Hades II").click()
+    page.wait_for_selector(".layer.is-open .drawer")
+    page.wait_for_timeout(400)
+    session.shot(page, "sales-drawer-failed-actions")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    page.locator(".table__body .trow", has_text="Буст рейтинга").click()
+    page.wait_for_timeout(400)
+    session.shot(page, "sales-drawer-no-rule")
+    session.close(page)
+
+    # Ссылка не открылась — показываем её.
+    page = session.open("home")
+    page.evaluate("() => { window.__mock.state.openFails = true; }")
+    page.locator(".feed-item.is-link").first.click()
+    page.wait_for_selector(".toast__url")
+    page.wait_for_timeout(300)
+    session.shot(page, "open-url-failed")
+    session.close(page)
+
+    page = session.open("relist", state="empty")
+    page.wait_for_selector(".split")
+    session.shot(page, "relist-empty")
     session.close(page)
 
 

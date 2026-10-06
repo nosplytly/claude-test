@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from playerok_bot.config import ConfigError
 from supplierhub.api import Api
 from supplierhub.configio import ConfigStore, slugify
 from supplierhub.errors import ApiError
@@ -66,21 +67,45 @@ def test_list_rules(workdir: Path, config_file: Path):
     ]
 
 
-def test_new_stock_rule_gets_unique_slug_file(workdir: Path):
+def test_new_stock_rule_reuses_unused_slug_file(workdir: Path):
     store = ConfigStore(workdir)
     (workdir / "stock").mkdir()
-    # Файл с таким именем уже есть (остался от удалённого правила) — не трогаем его.
+    # Файл остался от удалённого правила — новое правило подключает его, товар не «теряется».
     (workdir / "stock" / "klyuch-steam.txt").write_text("OLD\n", encoding="utf-8")
 
-    first = store.save_rule(_stock_rule())
-    second = store.save_rule(_stock_rule("КЛЮЧ steam"))
+    first, reused = store.save_rule_ex(_stock_rule())
+    second, reused_second = store.save_rule_ex(_stock_rule("КЛЮЧ steam"))
 
-    assert first["stock_file"] == "stock/klyuch-steam-2.txt"
-    assert second["stock_file"] == "stock/klyuch-steam-3.txt"
-    assert (workdir / "stock" / "klyuch-steam-2.txt").read_text(encoding="utf-8") == ""
-    assert first["stock_count"] == 0
+    assert first["stock_file"] == "stock/klyuch-steam.txt"
+    assert first["stock_count"] == 1 and reused is True
+    # Файл уже занят первым правилом — второму достаётся новый пустой.
+    assert second["stock_file"] == "stock/klyuch-steam-2.txt"
+    assert second["stock_count"] == 0 and reused_second is False
     assert (workdir / "stock" / "klyuch-steam.txt").read_text(encoding="utf-8") == "OLD\n"
     assert [rule["id"] for rule in store.rules()] == [0, 1]
+
+
+def test_stock_toggle_off_and_on_keeps_goods(api: Api, workdir: Path):
+    created = api.save_rule(_stock_rule())["data"]["item"]
+    api.add_stock(0, "KEY-1\nKEY-2")
+
+    api.save_rule({**_stock_rule(), "use_stock": False, "message": "Скоро"}, 0)
+    again = api.save_rule(_stock_rule(), 0)["data"]
+
+    assert again["item"]["stock_file"] == created["stock_file"]
+    assert again["item"]["stock_count"] == 2
+    assert again["reused_stock"] is True
+
+
+def test_deleted_rule_stock_is_reconnected_on_recreate(api: Api, workdir: Path):
+    api.save_rule(_stock_rule())
+    api.add_stock(0, "KEY-1\nKEY-2")
+    api.delete_rule(0)
+
+    recreated = api.save_rule(_stock_rule())["data"]
+
+    assert recreated["item"]["stock_file"] == "stock/klyuch-steam.txt"
+    assert recreated["item"]["stock_count"] == 2
 
 
 def test_rule_without_stock(workdir: Path):
@@ -181,21 +206,73 @@ def test_symlink_escaping_stock_dir_is_rejected(workdir: Path, tmp_path: Path):
         ConfigStore(workdir).save_rule(_stock_rule(stock_file="stock/link/keys.txt"))
 
 
-def test_unchanged_manual_path_outside_stock_is_allowed_on_edit(workdir: Path):
-    # Путь вне stock/ вписан вручную — окно не вводит новых путей, но и не мешает
-    # править такое правило, пока путь не меняют.
+def test_manual_path_outside_stock_is_refused(workdir: Path, opened: dict):
+    # Путь вне stock/ вписан в config.toml вручную (например, чужой «готовый» конфиг):
+    # окно такой файл не читает, не меняет, а бот с таким конфигом не запускается.
+    (workdir / "victim.txt").write_text("secret\n", encoding="utf-8")
     (workdir / "config.toml").write_text(
-        '[[delivery.rules]]\nmatch = "A"\nstock_file = "keys/a.txt"\nmessage = "{product}"\n',
+        '[playerok]\ntoken = "tok"\n[delivery]\nenabled = true\n'
+        '[[delivery.rules]]\nmatch = "A"\nstock_file = "victim.txt"\nmessage = "{product}"\n'
+        '[[delivery.rules]]\nmatch = "B"\nstock_file = "/etc/hostname"\nmessage = "{product}"\n'
+        '[[delivery.rules]]\nmatch = "C"\nstock_file = "stock/../config.toml"\n'
+        'message = "{product}"\n',
         encoding="utf-8",
     )
     store = ConfigStore(workdir)
+    api = Api(workdir, open_path=opened["paths"].append)
+    try:
+        for rule_id in (0, 1, 2):
+            for result in (
+                api.get_stock(rule_id),
+                api.add_stock(rule_id, "INJECTED"),
+                api.clear_stock(rule_id),
+                api.remove_stock_item(rule_id, 0, "secret"),
+            ):
+                assert result["ok"] is False and "папке stock" in result["error"]
+            assert api.list_rules()["data"]["items"][rule_id]["stock_count"] is None
+        assert (workdir / "victim.txt").read_text(encoding="utf-8") == "secret\n"
 
-    item = store.save_rule(_stock_rule("A", stock_file="keys/a.txt"), 0)
-    assert item["stock_file"] == "keys/a.txt"
-    assert not (workdir / "keys").exists()  # чужие папки не создаём
+        error = api.get_overview()["data"]["config_error"]
+        assert error is not None and "папке stock" in error
+        assert "папке stock" in api.start_bot()["error"]
 
-    with pytest.raises(ApiError):
-        store.save_rule(_stock_rule("A", stock_file="keys/b.txt"), 0)
+        with pytest.raises(ConfigError, match="папке stock"):
+            store.save_rule(_stock_rule("A", stock_file="victim.txt"), 0)
+        with pytest.raises(ApiError):
+            store.save_rule(_stock_rule("A", stock_file="keys/b.txt"), 0)
+        assert not (workdir / "keys").exists()  # чужие папки не создаём
+
+        # Правило можно удалить, а исправленный путь — сохранить.
+        assert api.delete_rule(2)["ok"] is True
+        assert api.delete_rule(1)["ok"] is True
+        fixed = api.save_rule(_stock_rule("A", stock_file="stock/a.txt"), 0)
+        assert fixed["ok"] is True, fixed
+        assert api.get_overview()["data"]["config_error"] is None
+    finally:
+        api._shutdown()
+
+
+def test_stale_rule_view_is_refused(api: Api, config_file: Path):
+    rules = api.list_rules()["data"]["items"]
+    keys, guide = rules
+    # В другой вкладке правила поменяли местами — номер 0 теперь у «Гайд».
+    assert api.move_rule(0, 1, keys)["ok"] is True
+
+    stale = "Правила изменились — обновите страницу."
+    assert api.clear_stock(0, keys) == {"ok": False, "error": stale}
+    assert api.add_stock(0, "X", keys)["error"] == stale
+    assert api.get_stock(0, keys)["error"] == stale
+    assert api.remove_stock_item(0, 0, "K1", keys)["error"] == stale
+    assert api.delete_rule(0, keys)["error"] == stale
+    assert api.move_rule(0, 1, keys)["error"] == stale
+    assert api.save_rule(_stock_rule(), 0, keys)["error"] == stale
+    assert len(api.list_rules()["data"]["items"]) == 2
+
+    # С правильным правилом (или только match) всё работает.
+    assert api.get_stock(1, keys)["data"]["count"] == 3
+    assert api.add_stock(1, "K4", {"match": "Ключ Steam"})["data"]["count"] == 4
+    assert api.delete_rule(0, guide)["ok"] is True
+    assert api.get_stock(0, "Ключ Steam")["ok"] is True
 
 
 @pytest.mark.parametrize(

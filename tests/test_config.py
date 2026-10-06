@@ -104,3 +104,79 @@ message = "second"
     assert config.delivery.find_rule("Ключ STEAM Witcher").message == "first"
     assert config.delivery.find_rule("Аккаунт") is None
     assert config.delivery.find_rule(None) is None
+
+
+def test_notepad_bom_and_crlf_are_accepted(tmp_path: Path):
+    # Блокнот: «UTF-8 с BOM» и переводы строк Windows.
+    text = (
+        '[playerok]\r\ntoken = "tok"\r\n[[delivery.rules]]\r\nmatch = "Ключ"\r\nmessage = "x"\r\n'
+    )
+    path = tmp_path / "config.toml"
+    path.write_bytes(text.encode("utf-8-sig"))
+
+    config = load_config(path)
+
+    assert config.playerok.token == "tok"
+    assert config.delivery.rules[0].match == "Ключ"
+
+
+def test_config_not_in_utf8(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_bytes('[playerok]\ntoken = "ключ"\n'.encode("cp1251"))
+
+    with pytest.raises(ConfigError, match="UTF-8"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "proxy", ["http://1.2.3.4:8080", "https://user:pass@proxy.example:443", "  "]
+)
+def test_valid_proxies(tmp_path: Path, proxy: str):
+    path = _write(
+        tmp_path,
+        f'[playerok]\ntoken = "t"\nproxy = "{proxy}"\n[telegram]\nproxy = "{proxy}"\n',
+    )
+
+    config = load_config(path)
+
+    assert config.playerok.proxy == (proxy.strip() or None)
+    assert config.telegram.proxy == (proxy.strip() or None)
+
+
+@pytest.mark.parametrize(
+    ("section", "proxy", "fragment"),
+    [
+        ("playerok", "1.2.3.4:8080", "должен начинаться с http://"),
+        ("telegram", "1.2.3.4:8080", "должен начинаться с http://"),
+        ("telegram", "ftp://1.2.3.4", "должен начинаться с http://"),
+        ("playerok", "http://", "нет сервера"),
+    ],
+)
+def test_bad_proxy_is_reported_at_load(tmp_path: Path, section: str, proxy: str, fragment: str):
+    # Telegram выключен, но неверный прокси всё равно ловится сразу, а не при запуске бота.
+    table = "" if section == "playerok" else f"[{section}]\n"
+    path = _write(tmp_path, f'[playerok]\ntoken = "t"\n{table}proxy = "{proxy}"\n')
+
+    with pytest.raises(ConfigError, match=fragment):
+        load_config(path)
+
+
+def test_socks_proxy_accepted_when_socksio_installed(tmp_path: Path):
+    path = _write(tmp_path, '[playerok]\ntoken = "t"\nproxy = "socks5://1.2.3.4:1080"\n')
+
+    assert load_config(path).playerok.proxy == "socks5://1.2.3.4:1080"
+
+
+def test_socks_proxy_without_socksio_is_explained(tmp_path: Path, monkeypatch):
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name, *a: None if name == "socksio" else real(name, *a)
+    )
+    path = _write(
+        tmp_path, '[telegram]\nproxy = "socks5://1.2.3.4:1080"\n[playerok]\ntoken = "t"\n'
+    )
+
+    with pytest.raises(ConfigError, match="SOCKS"):
+        load_config(path)

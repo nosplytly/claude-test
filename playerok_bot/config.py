@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 __all__ = [
     "Config",
@@ -17,6 +20,7 @@ __all__ = [
     "RelistConfig",
     "TelegramConfig",
     "load_config",
+    "parse_toml",
 ]
 
 
@@ -102,11 +106,7 @@ def load_config(path: str | os.PathLike[str]) -> Config:
             f"Не найден файл настроек {path}. Скопируйте config.example.toml в config.toml "
             "и заполните его."
         )
-    try:
-        with path.open("rb") as handle:
-            raw = tomllib.load(handle)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"Ошибка синтаксиса в {path}: {exc}") from exc
+    raw = parse_toml(path.read_bytes(), str(path))
 
     base = path.resolve().parent
     bot = _table(raw, "bot")
@@ -120,6 +120,18 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     )
 
 
+def parse_toml(data: bytes, name: str) -> dict[str, Any]:
+    """Разобрать TOML; BOM от Блокнота («UTF-8 с BOM») не мешает."""
+    try:
+        text = data.removeprefix(b"\xef\xbb\xbf").decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{name} должен быть в кодировке UTF-8 — пересохраните файл.") from exc
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Ошибка синтаксиса в {name}: {exc}") from exc
+
+
 def _playerok(raw: dict[str, Any]) -> PlayerokConfig:
     token = os.environ.get("PLAYEROK_TOKEN") or _str(raw, "playerok.token", "")
     if not token:
@@ -129,7 +141,7 @@ def _playerok(raw: dict[str, Any]) -> PlayerokConfig:
         )
     return PlayerokConfig(
         token=token,
-        proxy=_str(raw, "playerok.proxy", "") or None,
+        proxy=_proxy(raw, "playerok.proxy"),
         deals_interval=_positive(raw, "playerok.deals_interval", 20.0, minimum=5.0),
         use_websocket=_bool(raw, "playerok.use_websocket", True),
     )
@@ -156,7 +168,7 @@ def _telegram(raw: dict[str, Any]) -> TelegramConfig:
         chat_ids=list(chat_ids),
         notify_messages=_bool(raw, "telegram.notify_messages", True),
         messages_interval=_positive(raw, "telegram.messages_interval", 10.0, minimum=3.0),
-        proxy=_str(raw, "telegram.proxy", "") or None,
+        proxy=_proxy(raw, "telegram.proxy"),
     )
 
 
@@ -236,6 +248,31 @@ def _bool(raw: dict[str, Any], name: str, default: bool) -> bool:
     value = raw.get(name.rsplit(".", 1)[-1], default)
     if not isinstance(value, bool):
         raise ConfigError(f"{name} должен быть true или false")
+    return value
+
+
+def _proxy(raw: dict[str, Any], name: str) -> str | None:
+    """Адрес прокси или None. Ошибку видно сразу при сохранении, а не при запуске бота."""
+    value = _str(raw, name, "").strip()
+    if not value:
+        return None
+    scheme = value.partition("://")[0].casefold() if "://" in value else ""
+    if scheme not in ("http", "https", "socks5", "socks5h"):
+        raise ConfigError(
+            f"{name}: адрес прокси должен начинаться с http://, https:// или socks5://, "
+            "например http://user:pass@1.2.3.4:8080"
+        )
+    if scheme.startswith("socks") and importlib.util.find_spec("socksio") is None:
+        raise ConfigError(
+            f"{name}: SOCKS-прокси в этой сборке не поддерживается — укажите HTTP-прокси "
+            "(адрес вида http://…)."
+        )
+    try:
+        url = httpx.Proxy(value).url
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{name}: неверный адрес прокси ({exc})") from None
+    if not url.host:
+        raise ConfigError(f"{name}: в адресе прокси нет сервера, например http://1.2.3.4:8080")
     return value
 
 

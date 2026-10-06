@@ -7,20 +7,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import math
 import os
 import re
 import tempfile
 import threading
-import tomllib
+import time
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import tomli_w
 
-from playerok_bot.config import Config, ConfigError, load_config
-from playerok_bot.stock import Stock
+from playerok_bot.config import Config, ConfigError, load_config, parse_toml
+from playerok_bot.fileio import RETRY_DELAYS, atomic_write_text
+from playerok_bot.stock import Stock, StockError
 
 from .errors import ApiError
 
@@ -107,6 +109,7 @@ _HEADER = (
 _STOCK_OUTSIDE = (
     "Файл склада должен лежать в папке stock рядом с config.toml, например stock/keys.txt."
 )
+_STALE_RULE = "Правила изменились — обновите страницу."
 
 _CYRILLIC = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
 _LATIN = "a b v g d e e zh z i y k l m n o p r s t u f h ts ch sh sch - y - e yu ya".split()  # noqa: SIM905
@@ -154,6 +157,9 @@ class ConfigStore:
         self._lock = threading.RLock()
         self._cache: tuple[tuple[int, int, int], dict[str, Any]] | None = None
         self._check: tuple[tuple[int, int, int], str | None] | None = None
+        #: Число товаров по файлу склада: окно спрашивает каждые 2 с, а лишний раз
+        #: открытый файл на Windows мешает боту его подменить.
+        self._counts: dict[Path, tuple[tuple[int, int, int], int]] = {}
 
     # --- чтение ------------------------------------------------------------
 
@@ -168,15 +174,7 @@ class ConfigStore:
                 return {}
             if self._cache is not None and self._cache[0] == key:
                 return copy.deepcopy(self._cache[1])
-            try:
-                with self.path.open("rb") as handle:
-                    raw = tomllib.load(handle)
-            except tomllib.TOMLDecodeError as exc:
-                raise ConfigError(f"Ошибка синтаксиса в {self.path.name}: {exc}") from exc
-            except UnicodeDecodeError as exc:
-                raise ConfigError(
-                    f"{self.path.name} должен быть в кодировке UTF-8 — пересохраните файл."
-                ) from exc
+            raw = parse_toml(_read_bytes(self.path), self.path.name)
             self._cache = (key, raw)
             return copy.deepcopy(raw)
 
@@ -226,7 +224,9 @@ class ConfigStore:
             )
         if not self.token():
             raise ApiError("Не задан токен Playerok — укажите его в «Настройках».")
-        return load_config(self.path)
+        config = load_config(self.path)
+        self._confine(config)
+        return config
 
     def validation_error(self) -> str | None:
         """Ошибка в текущем config.toml (без учёта пустого токена) или None."""
@@ -274,26 +274,37 @@ class ConfigStore:
         raw = self.read_raw() if raw is None else raw
         return [self._rule_view(index, rule) for index, rule in enumerate(_rules(raw))]
 
-    def save_rule(self, rule: Any, rule_id: Any = None) -> dict[str, Any]:
+    def save_rule(self, rule: Any, rule_id: Any = None, expected: Any = None) -> dict[str, Any]:
         """Создать правило (rule_id=None) или изменить существующее."""
+        return self.save_rule_ex(rule, rule_id, expected)[0]
+
+    def save_rule_ex(
+        self, rule: Any, rule_id: Any = None, expected: Any = None
+    ) -> tuple[dict[str, Any], bool]:
+        """Как save_rule, но ещё сообщает, подключён ли существующий файл склада с товаром."""
         match, message, use_stock, wanted_file, per_sale, low = _rule_input(rule)
         with self._lock:
             raw = self.read_raw() if self.exists() else _new_raw()
             rules = _rules(raw, create=True)
             index = None if rule_id is None else _index(rule_id, len(rules))
+            if index is not None:
+                _check_expected(rules[index], expected)
             old = rules[index] if index is not None and isinstance(rules[index], dict) else {}
 
             stock_file: str | None = None
+            reused = False
             if use_stock:
                 old_file = _clean_str(old.get("stock_file"))
                 if wanted_file and old_file and _same_path(wanted_file, old_file):
-                    # Путь не меняли: оставляем как записан, даже если его
-                    # вручную вписали вне stock/ — окно новых путей не вводит.
+                    # Путь не меняли: оставляем как записан (проверка «только в stock/»
+                    # всё равно пройдёт ниже, в _validate).
                     stock_file = old_file
                 elif wanted_file:
                     stock_file = self.safe_stock_path(wanted_file)
+                elif old_file:
+                    stock_file = old_file
                 else:
-                    stock_file = old_file or self._new_stock_file(match, rules)
+                    stock_file, reused = self._new_stock_file(match, rules, index)
 
             # Порядок ключей — как в config.example.toml, чтобы файл было удобно читать.
             entry: dict[str, Any] = {"match": match}
@@ -311,17 +322,19 @@ class ConfigStore:
             self._write(raw)
             if stock_file:
                 self._touch_stock(stock_file)
-            return self._rule_view(index, entry)
+            return self._rule_view(index, entry), reused
 
-    def delete_rule(self, rule_id: Any) -> None:
+    def delete_rule(self, rule_id: Any, expected: Any = None) -> None:
         """Удалить правило; файл склада остаётся на диске."""
         with self._lock:
             raw = self.read_raw()
             rules = _rules(raw)
-            del rules[_index(rule_id, len(rules))]
+            index = _index(rule_id, len(rules))
+            _check_expected(rules[index], expected)
+            del rules[index]
             self._write(raw)
 
-    def move_rule(self, rule_id: Any, direction: Any) -> list[dict[str, Any]]:
+    def move_rule(self, rule_id: Any, direction: Any, expected: Any = None) -> list[dict[str, Any]]:
         """Сдвинуть правило вверх (-1) или вниз (+1): порядок важен для поиска."""
         if direction not in (-1, 1) or isinstance(direction, bool):
             raise ApiError("Направление должно быть -1 (вверх) или 1 (вниз).")
@@ -329,20 +342,29 @@ class ConfigStore:
             raw = self.read_raw()
             rules = _rules(raw)
             index = _index(rule_id, len(rules))
+            _check_expected(rules[index], expected)
             target = index + int(direction)
             if 0 <= target < len(rules):
                 rules[index], rules[target] = rules[target], rules[index]
                 self._write(raw)
             return self.rules(raw)
 
-    def stock_for(self, rule_id: Any) -> tuple[Stock, str]:
-        """Склад правила и путь к нему, как он записан в конфиге."""
+    def stock_for(self, rule_id: Any, expected: Any = None) -> tuple[Stock, str]:
+        """Склад правила и путь к нему, как он записан в конфиге.
+
+        Путь, вписанный в config.toml вручную, проверяется так же, как из окна:
+        файл вне stock/ окно не читает и не меняет.
+        """
         rules = _rules(self.read_raw())
         rule = rules[_index(rule_id, len(rules))]
+        _check_expected(rule, expected)
         stock_file = _clean_str(rule.get("stock_file")) if isinstance(rule, dict) else ""
         if not stock_file:
             raise ApiError("У этого правила нет склада — включите «Выдавать товар со склада».")
-        return Stock(self.workdir / stock_file), stock_file
+        path = self._stock_path(stock_file)
+        if path is None:
+            raise ApiError(f"{_STOCK_OUTSIDE} Сейчас в правиле указано: {stock_file}")
+        return Stock(path), stock_file
 
     def safe_stock_path(self, value: str) -> str:
         """Проверить путь склада из окна: только внутри <workdir>/stock.
@@ -381,14 +403,51 @@ class ConfigStore:
 
     # --- внутреннее ----------------------------------------------------------
 
+    def _stock_path(self, stock_file: str) -> Path | None:
+        """Абсолютный путь склада или None, если он ведёт за пределы <workdir>/stock."""
+        root = self.stock_root.resolve()
+        try:
+            path = (self.workdir / stock_file).resolve()
+        except (OSError, ValueError):
+            return None
+        if path == root or not path.is_relative_to(root):
+            return None
+        return path
+
+    def _confine(self, config: Config) -> None:
+        """Склады всех правил — только внутри <workdir>/stock (иначе ConfigError)."""
+        for number, rule in enumerate(config.delivery.rules, start=1):
+            if rule.stock_file is None:
+                continue
+            root = self.stock_root.resolve()
+            path = rule.stock_file.resolve()
+            if path == root or not path.is_relative_to(root):
+                raise ConfigError(f"delivery.rules №{number} («{rule.match}»): {_STOCK_OUTSIDE}")
+
+    def _stock_count(self, path: Path) -> int:
+        """Сколько товаров в файле; файл читается, только если он изменился."""
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            self._counts.pop(path, None)
+            return 0
+        key = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        cached = self._counts.get(path)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        count = Stock(path).count()
+        self._counts[path] = (key, count)
+        return count
+
     def _rule_view(self, index: int, rule: Any) -> dict[str, Any]:
         rule = rule if isinstance(rule, dict) else {}
         stock_file = _clean_str(rule.get("stock_file")) or None
         count: int | None = None
-        if stock_file:
+        path = self._stock_path(stock_file) if stock_file else None
+        if path is not None:
             try:
-                count = Stock(self.workdir / stock_file).count()
-            except (OSError, UnicodeError):
+                count = self._stock_count(path)
+            except (OSError, UnicodeError, StockError):
                 count = None
         per_sale = rule.get("products_per_sale", 1)
         low = rule.get("low_stock_alert", 0)
@@ -402,17 +461,29 @@ class ConfigStore:
             "stock_count": count,
         }
 
-    def _new_stock_file(self, match: str, rules: list[Any]) -> str:
-        used = {
-            _clean_str(rule.get("stock_file")).replace("\\", "/").casefold()
-            for rule in rules
-            if isinstance(rule, dict)
-        }
+    def _new_stock_file(
+        self, match: str, rules: list[Any], index: int | None = None
+    ) -> tuple[str, bool]:
+        """Файл склада для правила: stock/<slug>.txt.
+
+        Файл с таким именем, который не занят другим правилом, подключается
+        как есть: это склад удалённого правила или правила, у которого
+        выключали и снова включали склад, — товар в нём не должен «пропасть».
+        Возвращает (путь, подключён ли файл с товаром).
+        """
+        used: set[Path] = set()
+        for number, rule in enumerate(rules):
+            stock = _clean_str(rule.get("stock_file")) if isinstance(rule, dict) else ""
+            if stock and number != index:
+                with contextlib.suppress(OSError, ValueError):
+                    used.add((self.workdir / stock).resolve())
         slug = slugify(match)
         for number in range(1, 1000):
             name = f"{STOCK_DIR}/{slug}{'' if number == 1 else f'-{number}'}.txt"
-            if name.casefold() not in used and not (self.workdir / name).exists():
-                return name
+            path = (self.workdir / name).resolve()
+            if path in used or (path.exists() and not path.is_file()):
+                continue
+            return name, path.is_file() and path.stat().st_size > 0
         raise ApiError("Не удалось подобрать имя файла склада — укажите его вручную.")
 
     def _touch_stock(self, stock_file: str) -> None:
@@ -438,22 +509,19 @@ class ConfigStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
-            return load_config(tmp)
+            config = load_config(tmp)
         finally:
-            Path(tmp).unlink(missing_ok=True)
+            # Временный файл может держать антивирус: проверка от этого не должна падать.
+            with contextlib.suppress(OSError):
+                Path(tmp).unlink(missing_ok=True)
+        self._confine(config)
+        return config
 
     def _write(self, raw: dict[str, Any]) -> None:
         """Атомарно записать config.toml: при сбое старый файл останется целым."""
         text = _HEADER + tomli_w.dumps(raw, multiline_strings=True)
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.workdir, prefix=".config-", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(text)
-            os.replace(tmp, self.path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+            atomic_write_text(self.path, text, prefix=".config-", newline="\n")
         finally:
             self._cache = None
             self._check = None
@@ -490,6 +558,35 @@ def _rules(raw: dict[str, Any], *, create: bool = False) -> list[Any]:
             return []
         rules = delivery["rules"] = []
     return rules
+
+
+def _read_bytes(path: Path) -> bytes:
+    """Прочитать файл, повторяя попытку, пока его держит другая программа."""
+    for delay in RETRY_DELAYS:
+        try:
+            return path.read_bytes()
+        except PermissionError:
+            time.sleep(delay)
+    return path.read_bytes()
+
+
+def _check_expected(rule: Any, expected: Any) -> None:
+    """Окно присылает правило, каким его видело (match и stock_file): если по этому
+    номеру уже другое правило (файл правили в другой вкладке или вручную) — ошибка."""
+    if expected is None:
+        return
+    if isinstance(expected, str):
+        expected = {"match": expected}
+    if not isinstance(expected, dict):
+        raise ApiError("Некорректные данные правила.")
+    rule = rule if isinstance(rule, dict) else {}
+    if "match" in expected and _clean_str(rule.get("match")) != _clean_str(expected["match"]):
+        raise ApiError(_STALE_RULE)
+    if "stock_file" in expected:
+        have = _clean_str(rule.get("stock_file"))
+        want = _clean_str(expected["stock_file"])
+        if bool(have) != bool(want) or (have and not _same_path(have, want)):
+            raise ApiError(_STALE_RULE)
 
 
 def _index(rule_id: Any, count: int) -> int:

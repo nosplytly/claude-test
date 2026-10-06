@@ -16,8 +16,10 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from playerok_bot.lock import ProcessLock
+
 from . import __version__
-from .api import LOCK_NAME, Api
+from .api import LOCK_NAME, Api, endpoint_names, safe_log_file
 from .configio import ConfigStore
 from .feed import EventFeed, LogBuffer
 from .paths import icon_path, resolve_workdir, user_data_dir, web_dir
@@ -35,6 +37,13 @@ WINDOW_BACKGROUND = "#05070D"
 #: Постоянный порт встроенного сервера окна: от адреса страницы зависит
 #: localStorage (последняя открытая вкладка и т. п.).
 WINDOW_HTTP_PORT = 42017
+#: Замок «приложение с этой рабочей папкой уже открыто» и адрес его страницы.
+INSTANCE_LOCK = ".supplierhub.app.lock"
+INSTANCE_URL = ".supplierhub.url"
+CLOSE_QUESTION = (
+    "Бот работает, только пока SupplierHub открыт. Если закрыть окно, бот остановится "
+    "и перестанет выдавать товар покупателям.\n\nЗакрыть SupplierHub?"
+)
 _LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 _NOISY_LOGGERS = ("httpx", "httpcore", "websockets", "asyncio")
 
@@ -48,8 +57,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Не удалось открыть рабочую папку {args.workdir}: {exc}", file=sys.stderr)
         return 2
 
+    instance = ProcessLock(workdir / INSTANCE_LOCK)
+    if instance.acquire():
+        # Адрес от упавшего прошлого запуска больше не действует.
+        with contextlib.suppress(OSError):
+            (workdir / INSTANCE_URL).unlink(missing_ok=True)
+    elif _show_running_instance(workdir, open_browser=not args.no_open):
+        return 0
+
     logs = LogBuffer()
-    handlers = setup_logging(logs, ConfigStore(workdir).log_file(), debug=args.debug)
+    log_file = ConfigStore(workdir).log_file()
+    if log_file is not None and not safe_log_file(workdir, log_file):
+        print(f"Журнал не пишется в {log_file}: нужен .log/.txt в рабочей папке", file=sys.stderr)
+        log_file = None
+    handlers = setup_logging(logs, log_file, debug=args.debug)
     logger.info("SupplierHub %s, рабочая папка: %s", __version__, workdir)
     feed = EventFeed()
     runtime = BotRuntime(feed, lock_path=workdir / LOCK_NAME)
@@ -59,11 +80,13 @@ def main(argv: list[str] | None = None) -> int:
             if run_window(api, debug=args.debug):
                 return 0
             logger.warning("Окно приложения не запустилось — открываю SupplierHub в браузере")
-        return run_browser(api, port=args.port, open_browser=not args.no_open)
+        url_file = (workdir / INSTANCE_URL) if instance.held else None
+        return run_browser(api, port=args.port, open_browser=not args.no_open, url_file=url_file)
     finally:
         runtime.stop()
         logger.info("SupplierHub закрыт")
         _remove_handlers(handlers)
+        instance.release()
 
 
 def setup_logging(
@@ -127,16 +150,22 @@ def run_window(api: Api, *, debug: bool = False) -> bool:
     api._set_mode("window")
     shown = threading.Event()
     try:
+        # Сам объект Api окну не отдаём: pywebview вызывает по имени из страницы
+        # любой вложенный атрибут js_api (в том числе `_config._write`), поэтому
+        # окну доступны только связанные методы из списка endpoint_names().
         window = webview.create_window(
             WINDOW_TITLE,
             url=str(index),
-            js_api=api,
+            js_api=NO_JS_API,
             width=WINDOW_SIZE[0],
             height=WINDOW_SIZE[1],
             min_size=WINDOW_MIN_SIZE,
             background_color=WINDOW_BACKGROUND,
         )
+        window.expose(*exposed_endpoints(api))
         window.events.shown += lambda: shown.set()
+        window.events.closing += _close_guard(api, window)
+        api._set_quit(window.destroy)
         icon = icon_path()
         webview.start(
             debug=debug,
@@ -151,7 +180,48 @@ def run_window(api: Api, *, debug: bool = False) -> bool:
             return True
         logger.warning("Не удалось открыть окно: %s", exc, exc_info=debug)
         return False
+    finally:
+        api._set_quit(None)
     return True
+
+
+class _NoAttributes:
+    """js_api для pywebview, у которого нет ни одного атрибута.
+
+    pywebview ищет имя из страницы сначала среди `window.expose(...)`, а затем
+    как путь атрибутов js_api. С `None` по такому пути доступны служебные
+    атрибуты самого None — здесь недоступно ничего.
+    """
+
+    __slots__ = ()
+
+    def __getattribute__(self, name: str) -> Any:
+        raise AttributeError(name)
+
+
+NO_JS_API = _NoAttributes()
+
+
+def exposed_endpoints(api: Api) -> list[Callable[..., Any]]:
+    """Связанные методы Api, которые можно вызывать из окна (и только они)."""
+    return [getattr(api, name) for name in sorted(endpoint_names())]
+
+
+def _close_guard(api: Api, window: Any) -> Callable[[], bool]:
+    """Перед закрытием окна с работающим ботом — спросить: бот остановится."""
+
+    def on_closing() -> bool:
+        if not api._runtime.active:
+            return True
+        try:
+            answer = window.create_confirmation_dialog(WINDOW_TITLE, CLOSE_QUESTION)
+        except Exception:
+            logger.exception("Не удалось спросить о закрытии окна")
+            return True
+        # None — диалог не показался: не мешаем закрыть окно.
+        return answer is not False
+
+    return on_closing
 
 
 def run_browser(
@@ -160,8 +230,13 @@ def run_browser(
     port: int = 0,
     open_browser: bool = True,
     stop_event: threading.Event | None = None,
+    url_file: Path | None = None,
 ) -> int:
-    """Режим браузера: локальный HTTP-мост, работает до Ctrl+C / SIGTERM."""
+    """Режим браузера: локальный HTTP-мост, работает до Ctrl+C / SIGTERM / «Выйти».
+
+    `url_file` — куда записать адрес страницы: повторный запуск SupplierHub
+    с той же папкой откроет эту же вкладку, а не второй экземпляр.
+    """
     api._set_mode("browser")
     try:
         server = BridgeServer(api, web_dir(), port=port)
@@ -169,13 +244,16 @@ def run_browser(
         logger.error("Не удалось занять порт %s: %s", port, exc)
         print(f"Не удалось занять порт {port}: {exc}", file=sys.stderr)
         return 1
+    stop = stop_event or threading.Event()
+    api._set_quit(stop.set)
     server.start()
+    if url_file is not None:
+        _write_url_file(url_file, server.url)
     print(f"SupplierHub работает: {server.url}", flush=True)
-    print("Чтобы закрыть SupplierHub, нажмите Ctrl+C.", flush=True)
+    print("Чтобы закрыть SupplierHub, нажмите «Выйти» в окне или Ctrl+C.", flush=True)
     if open_browser:
         webbrowser.open(server.url)
 
-    stop = stop_event or threading.Event()
     previous = _install_signal_handlers(stop)
     try:
         while not stop.wait(0.5):
@@ -184,11 +262,36 @@ def run_browser(
         pass
     finally:
         _restore_signal_handlers(previous)
+        api._set_quit(None)
+        if url_file is not None:
+            with contextlib.suppress(OSError):
+                url_file.unlink(missing_ok=True)
         server.shutdown()
     return 0
 
 
 # --- мелочи -------------------------------------------------------------------
+
+
+def _show_running_instance(workdir: Path, *, open_browser: bool) -> bool:
+    """SupplierHub с этой папкой уже открыт: показать его вкладку. True — показали."""
+    try:
+        url = (workdir / INSTANCE_URL).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not url.startswith("http://127.0.0.1:"):
+        return False
+    print(f"SupplierHub с этой папкой уже работает: {url}", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+    return True
+
+
+def _write_url_file(path: Path, url: str) -> None:
+    try:
+        path.write_text(url + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Не удалось записать адрес страницы в %s: %s", path, exc)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

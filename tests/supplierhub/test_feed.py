@@ -130,7 +130,7 @@ def test_real_bot_messages():
 
     assert sale == {
         "kind": "sale",
-        "title": "Новая продажа: «Ключ <Steam>» за 99.50 ₽",
+        "title": "Новая продажа: «Ключ <Steam>» за 99,50\u00a0₽",
         "text": "Покупатель: ivan & co",
         "url": "https://playerok.com/deal/d1",
     }

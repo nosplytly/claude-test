@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
-__all__ = ["Stock"]
+from .fileio import atomic_write_text, read_text
+
+__all__ = ["Stock", "StockError"]
 
 # Один файл может обслуживать несколько правил, а править его может и бот,
 # и окно приложения из другого потока — поэтому блокировка общая на путь.
@@ -16,9 +16,21 @@ _locks: dict[Path, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
 
+class StockError(Exception):
+    """Файл склада нельзя прочитать — сообщение показывается пользователю как есть."""
+
+
 def _lock_for(path: Path) -> threading.Lock:
     with _locks_guard:
         return _locks.setdefault(path, threading.Lock())
+
+
+def _expand(line: str) -> str:
+    return line.replace("\\n", "\n")
+
+
+def _collapse(product: str) -> str:
+    return product.replace("\n", "\\n")
 
 
 class Stock:
@@ -40,13 +52,49 @@ class Stock:
 
     async def take(self, amount: int) -> list[str] | None:
         """Забрать `amount` товаров из начала файла; None, если их не хватает."""
+        taken, _ = self.take_unique(amount)
+        return taken
+
+    def take_unique(
+        self, amount: int, used: Callable[[str], bool] | None = None
+    ) -> tuple[list[str] | None, list[str]]:
+        """Забрать `amount` товаров, пропуская уже выданные.
+
+        `used(товар)` — выдавался ли товар раньше (например, файл пересохранили
+        из Блокнота, открытого до продажи, и выданная строка вернулась). Такие
+        строки и повторы внутри одной выдачи убираются из файла и не выдаются.
+        Возвращает (товары или None, если их не хватает; убранные строки).
+        """
         with _lock_for(self.path):
             lines = self._read()
-            if len(lines) < amount:
-                return None
-            taken, rest = lines[:amount], lines[amount:]
+            taken: list[str] = []
+            kept_raw: list[str] = []
+            dropped: list[str] = []
+            rest: list[str] = []
+            for line in lines:
+                if len(taken) >= amount:
+                    rest.append(line)
+                    continue
+                product = _expand(line)
+                if product in taken or (used is not None and used(product)):
+                    dropped.append(product)
+                else:
+                    taken.append(product)
+                    kept_raw.append(line)
+            if len(taken) < amount:
+                # Не хватает — ничего не забираем, но выданные повторно строки убираем.
+                if dropped:
+                    self._write(kept_raw)
+                return None, dropped
             self._write(rest)
-        return [line.replace("\\n", "\n") for line in taken]
+        return taken, dropped
+
+    def put_back(self, products: list[str]) -> None:
+        """Вернуть забранные товары в начало файла (выдача сорвалась до записи в state)."""
+        if not products:
+            return
+        with _lock_for(self.path):
+            self._write([_collapse(product) for product in products] + self._read())
 
     def add(self, lines: Iterable[str]) -> int:
         """Дописать товары в конец файла. Возвращает, сколько добавлено."""
@@ -80,18 +128,23 @@ class Stock:
     def _read(self) -> list[str]:
         if not self.path.is_file():
             return []
-        # utf-8-sig съедает BOM, который ставит Блокнот Windows.
-        text = self.path.read_text(encoding="utf-8-sig")
+        try:
+            # utf-8-sig съедает BOM, который ставит Блокнот Windows.
+            text = read_text(self.path, encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise StockError(
+                f"Файл склада {self.path.name} не в кодировке UTF-8 — откройте его "
+                "в Блокноте и сохраните с кодировкой UTF-8."
+            ) from exc
+        if "\x00" in text:
+            # Так выглядит файл, недописанный при сбое питания: выдавать из него нельзя.
+            raise StockError(
+                f"Файл склада {self.path.name} повреждён (в нём нулевые байты) — "
+                "проверьте его содержимое и сохраните заново."
+            )
         return [line.strip() for line in text.splitlines() if line.strip()]
 
     def _write(self, lines: list[str]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         # Пишем во временный файл и подменяем: при сбое старый файл останется целым.
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".stock-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write("".join(f"{line}\n" for line in lines))
-            os.replace(tmp, self.path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        text = "".join(f"{line}\n" for line in lines)
+        atomic_write_text(self.path, text, prefix=".stock-", newline="\n")

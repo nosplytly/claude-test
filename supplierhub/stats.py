@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from PlayerokAPI import Deal, ItemDealDirection
+
+from playerok_bot.fileio import read_text
 
 __all__ = [
     "DEAL_LABELS",
@@ -19,6 +21,8 @@ __all__ = [
     "build_sales",
     "compute_stats",
     "local_date",
+    "needs_attention",
+    "sale_delivery",
 ]
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,7 @@ DELIVERY_LABELS: dict[str, str] = {
     "failed": "Ошибка выдачи",
     "no_rule": "Без автовыдачи",
     "skipped": "Пропущена",
+    "manual": "Выдано вручную",
 }
 
 #: Статусы сделки, при которых продажа состоялась (деньги получены или придут).
@@ -81,7 +86,7 @@ class HistoryReader:
             if key == self._key:
                 return self._data
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
+                raw = json.loads(read_text(path))
             except (OSError, ValueError) as exc:
                 logger.debug("Не удалось прочитать %s: %s", path, exc)
                 return self._data
@@ -112,9 +117,14 @@ def build_sales(
     recent: Iterable[Deal] | None,
     history: dict[str, dict[str, Any]],
     *,
-    limit: int = MAX_SALES,
+    limit: int | None = MAX_SALES,
+    has_rule: Callable[[str | None], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    """Свежие сделки из последнего опроса + история выдач без повторов, новые сверху."""
+    """Свежие сделки из последнего опроса + история выдач без повторов, новые сверху.
+
+    `has_rule(название)` — есть ли теперь правило для лота: у сделок «Без автовыдачи»
+    окно тогда предлагает «Выдать по правилу».
+    """
     sales: dict[str, dict[str, Any]] = {}
     for deal in recent or ():
         if deal.direction == ItemDealDirection.IN or not deal.id or deal.id in sales:
@@ -123,8 +133,35 @@ def build_sales(
     for deal_id, entry in history.items():
         if deal_id not in sales:
             sales[deal_id] = _sale_from_history(deal_id, entry)
+    for sale in sales.values():
+        sale["attention"] = needs_attention(sale)
+        delivery = sale["delivery"]
+        if delivery is not None:
+            delivery["rule_available"] = bool(
+                delivery["status"] == "no_rule"
+                and has_rule is not None
+                and sale["status"] in (None, "PAID")
+                and has_rule(sale["item"])
+            )
     ordered = sorted(sales.values(), key=_sort_key, reverse=True)
-    return ordered[:limit]
+    return ordered if limit is None else ordered[:limit]
+
+
+def needs_attention(sale: dict[str, Any]) -> bool:
+    """Нужно ли продавцу что-то сделать с продажей.
+
+    Ошибка выдачи и «нет товара» — пока сделка не закрыта на площадке
+    (отправлена, завершена, возврат) и продавец не отметил её «Выдано вручную».
+    Продажа без правила — пока она оплачена и ждёт товара.
+    """
+    delivery = sale.get("delivery") or {}
+    status = delivery.get("status")
+    live = sale.get("status")
+    if live is not None and live != "PAID":
+        return False
+    if status in ATTENTION:
+        return True
+    return status == "no_rule" and live == "PAID"
 
 
 def compute_stats(
@@ -156,7 +193,7 @@ def compute_stats(
         for entry in history.values()
         if entry.get("status") == "delivered" and local_date(entry.get("delivered_at")) == today
     )
-    attention = sum(1 for entry in history.values() if entry.get("status") in ATTENTION)
+    attention = sum(1 for sale in sales if sale.get("attention", needs_attention(sale)))
     return {
         "sales_today": sales_today,
         "revenue_today": round(revenue, 2),
@@ -181,7 +218,7 @@ def _sale_from_deal(deal: Deal, entry: dict[str, Any] | None) -> dict[str, Any]:
         "status_label": DEAL_LABELS.get(status or "", status or UNKNOWN_DEAL_LABEL),
         "created_at": deal.created_at.isoformat() if deal.created_at else None,
         "chat_url": _CHAT_URL.format(chat_id) if chat_id else None,
-        "delivery": _delivery(entry),
+        "delivery": sale_delivery(entry),
     }
 
 
@@ -198,11 +235,12 @@ def _sale_from_history(deal_id: str, entry: dict[str, Any]) -> dict[str, Any]:
         # Время создания сделки бот не хранит — берём время её обработки.
         "created_at": _opt_str(entry.get("at")),
         "chat_url": _CHAT_URL.format(chat_id) if chat_id else None,
-        "delivery": _delivery(entry),
+        "delivery": sale_delivery(entry),
     }
 
 
-def _delivery(entry: dict[str, Any]) -> dict[str, Any] | None:
+def sale_delivery(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Блок `delivery` продажи из записи state.json."""
     status = entry.get("status")
     if not isinstance(status, str):
         return None
@@ -214,6 +252,8 @@ def _delivery(entry: dict[str, Any]) -> dict[str, Any] | None:
         "error": _opt_str(entry.get("error")),
         "delivered_at": _opt_str(entry.get("delivered_at")),
         "reason": _opt_str(entry.get("reason")),
+        "handled_at": _opt_str(entry.get("handled_at")),
+        "rule_available": False,
     }
 
 

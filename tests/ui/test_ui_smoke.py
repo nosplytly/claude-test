@@ -7,77 +7,18 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
 pytest.importorskip("playwright.sync_api")
 
-from playwright.sync_api import Browser, Error, Page, sync_playwright
+from playwright.sync_api import Browser
 
-from tests.ui.screenshots import CHROMIUM, MOCK, WEB, QuietHandler, serve
+from tests.ui.conftest import WEB, App, mock_state
+from tests.ui.screenshots import MOCK, QuietHandler, serve
 
 ROUTES = ("home", "sales", "delivery", "relist", "settings", "logs")
-
-
-@pytest.fixture(scope="module")
-def browser() -> Iterator[Browser]:
-    with sync_playwright() as pw:
-        try:
-            if Path(CHROMIUM).exists():
-                instance = pw.chromium.launch(executable_path=CHROMIUM)
-            else:
-                instance = pw.chromium.launch()
-        except Error as exc:
-            pytest.skip(f"Chromium недоступен: {exc}")
-        yield instance
-        instance.close()
-
-
-@pytest.fixture(scope="module")
-def base_url() -> Iterator[str]:
-    with serve(WEB) as url:
-        yield url
-
-
-class App:
-    """Страница приложения с фейковым API и сбором ошибок консоли."""
-
-    def __init__(self, browser: Browser, base_url: str) -> None:
-        self.browser = browser
-        self.base_url = base_url
-        self.errors: list[str] = []
-        self.pages: list[Page] = []
-
-    def open(self, route: str = "home", state: str = "running", *, mock: bool = True) -> Page:
-        context = self.browser.new_context(viewport={"width": 1280, "height": 820})
-        if mock:
-            context.add_init_script(path=str(MOCK))
-        page = context.new_page()
-        page.on("console", lambda msg: msg.type == "error" and self.errors.append(msg.text))
-        page.on("pageerror", lambda exc: self.errors.append(str(exc)))
-        self.pages.append(page)
-        page.goto(f"{self.base_url}/index.html?state={state}#/{route}")
-        page.wait_for_selector(f'.page[data-page="{route}"]')
-        return page
-
-    def close(self) -> None:
-        for page in self.pages:
-            page.context.close()
-
-
-@pytest.fixture
-def app(browser: Browser, base_url: str) -> Iterator[App]:
-    instance = App(browser, base_url)
-    yield instance
-    instance.close()
-    assert instance.errors == []
-
-
-def mock_state(page: Page, expression: str) -> object:
-    return page.evaluate(f"() => window.__mock.state.{expression}")
 
 
 @pytest.mark.parametrize("state", ["running", "empty", "error"])
@@ -112,14 +53,15 @@ def test_start_and_stop_bot(app: App) -> None:
     page.wait_for_selector(".botbox__title:has-text('Остановлен')", timeout=6000)
 
 
-def test_start_without_config_explains_what_to_do(app: App) -> None:
+def test_without_token_sidebar_leads_to_settings(app: App) -> None:
+    """Без токена «Запустить» только показал бы ошибку — меню сразу ведёт к полю токена."""
     page = app.open("home", "empty")
-    page.locator(".botbox").get_by_role("button", name="Запустить").click()
-    toast = page.locator(".toast--error")
-    toast.wait_for()
-    assert "config.toml" in toast.inner_text()
-    toast.get_by_role("button", name="Настройки").click()
+    botbox = page.locator(".botbox")
+    assert botbox.get_by_role("button", name="Запустить").count() == 0
+    assert "Нужен токен Playerok" in botbox.inner_text()
+    botbox.get_by_role("button", name="Указать токен").click()
     page.wait_for_selector('.page[data-page="settings"]')
+    page.wait_for_function("() => document.activeElement?.id === 'set-token'")
 
 
 def test_settings_save_and_validation(app: App) -> None:
@@ -202,7 +144,8 @@ def test_sales_filters_and_drawer(app: App) -> None:
     page.wait_for_selector(".table__body .trow")
     total = page.locator(".table__body .trow").count()
     page.get_by_role("radio", name="Требуют внимания").click()
-    assert page.locator(".table__body .trow").count() == 2 < total
+    # Ошибка выдачи, нет товара и оплаченная сделка без правила.
+    assert page.locator(".table__body .trow").count() == 3 < total
     page.locator(".table__body .trow", has_text="Hades II").click()
     drawer = page.locator(".layer.is-open .drawer")
     drawer.wait_for()
@@ -312,11 +255,13 @@ def test_opens_from_file_url(browser: Browser) -> None:
     assert [e for e in errors if "wght-normal.woff2" not in e] == []
 
 
-def test_rule_change_while_running_suggests_restart(app: App) -> None:
+def test_rule_change_applies_without_restart(app: App) -> None:
+    """Правила работающий бот подхватывает сам — подсказки о перезапуске нет."""
     page = app.open("delivery")
     page.locator(".rule").nth(1).get_by_role("button", name="Поднять правило").click()
-    hint = page.locator(".callout", has_text="старыми правилами")
-    hint.wait_for()
-    assert page.locator(".rule__match").first.inner_text() == "«Genshin Impact»"
-    hint.get_by_role("button", name="Перезапустить").click()
-    hint.wait_for(state="detached", timeout=8000)
+    page.wait_for_function(
+        "() => document.querySelector('.rule__match').textContent === '«Genshin Impact»'"
+    )
+    page.wait_for_timeout(300)
+    assert page.locator(".callout", has_text="старыми настройками").count() == 0
+    assert page.locator(".botbox__restart").count() == 0

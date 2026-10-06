@@ -16,7 +16,8 @@ a = Analysis(
     pathex=["."],
     datas=datas,
     # Хук pywebview (webview/__pyinstaller) сам добавит WebView2 и свои js-файлы.
-    hiddenimports=[],
+    # socksio httpx грузит лениво — без подсказки SOCKS-прокси в exe не заработают.
+    hiddenimports=["socksio"],
     excludes=["tkinter", "pytest", "playwright", "PIL", "PyInstaller"],
     noarchive=False,
 )

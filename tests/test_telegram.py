@@ -5,7 +5,7 @@ import json
 import httpx
 
 from playerok_bot.config import TelegramConfig
-from playerok_bot.telegram import Notifier, link
+from playerok_bot.telegram import Notifier, link, money
 
 
 def _notifier(handler, **overrides) -> Notifier:
@@ -63,3 +63,26 @@ def test_link_escapes():
     assert link("https://x/?a=1&b=2", "<товар>") == (
         '<a href="https://x/?a=1&amp;b=2">&lt;товар&gt;</a>'
     )
+
+
+async def test_disabled_telegram_with_bad_proxy_does_not_break_the_bot():
+    # Прокси не трогаем, пока Telegram выключен: бот должен работать.
+    notifier = Notifier(TelegramConfig(enabled=False, proxy="1.2.3.4:8080"))
+
+    assert await notifier.send("test")
+    await notifier.aclose()
+
+
+async def test_bad_proxy_only_fails_sending():
+    notifier = Notifier(
+        TelegramConfig(enabled=True, bot_token="1:a", chat_ids=[1], proxy="1.2.3.4:8080")
+    )
+
+    assert not await notifier.send("test")
+    await notifier.aclose()
+
+
+def test_money_in_russian_format():
+    assert money(18450.5) == "18 450,50 ₽"
+    assert money(100) == "100 ₽"
+    assert money(None) == "0 ₽"

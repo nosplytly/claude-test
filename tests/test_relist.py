@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
+import pytest
 from PlayerokAPI import ItemProfile
 
 from playerok_bot.relist import DEALS, ITEMS, AutoRelist
 
-from .conftest import make_deal
+from .conftest import FlakyReplace, make_deal
 
 
 def make(account, relist_config, state, notifier, can_sell=lambda name: True) -> AutoRelist:
@@ -116,5 +119,91 @@ async def test_expired_without_stock_is_skipped(account, relist_config, state, n
     relist = make(account, relist_config, state, notifier, can_sell=lambda name: False)
 
     await relist.relist_expired()
+
+    assert account.items.published == []
+
+
+async def test_after_sale_skips_lots_the_bot_does_not_deliver(
+    account, relist_config, state, notifier
+):
+    # Уникальный лот без правила автовыдачи: второй покупатель заплатил бы за то, чего нет.
+    relist = AutoRelist(
+        account,
+        "me",
+        relist_config,
+        state,
+        notifier,
+        lambda name: True,
+        auto_delivered=lambda name: False,
+    )
+
+    await relist.after_sale(make_deal(name="Аккаунт Genshin AR 60"))
+
+    assert account.items.published == []
+    assert state.get(DEALS, "d1")["result"] == "manual"
+    assert not notifier.find("снова в продаже")
+
+
+async def test_after_sale_relists_manual_lot_named_in_match(
+    account, relist_config, state, notifier
+):
+    relist_config.match = ["Аккаунт"]
+    relist = AutoRelist(
+        account,
+        "me",
+        relist_config,
+        state,
+        notifier,
+        lambda name: True,
+        auto_delivered=lambda name: False,
+    )
+
+    await relist.after_sale(make_deal(name="Аккаунт Genshin AR 60"))
+
+    assert account.items.published == ["i1"]
+
+
+async def test_relist_notice_shows_status_in_russian(account, relist_config, state, notifier):
+    await make(account, relist_config, state, notifier).after_sale(make_deal())
+
+    [notice] = notifier.find("снова в продаже")
+    assert "на модерации" in notice and "PENDING_APPROVAL" not in notice
+
+
+async def test_published_copy_is_remembered_even_if_state_write_fails(
+    account, relist_config, state, notifier, monkeypatch
+):
+    flaky = FlakyReplace(monkeypatch, only="state.json")
+    relist = make(account, relist_config, state, notifier)
+
+    await relist.after_sale(make_deal())
+    await relist.after_sale(make_deal())
+
+    # Лот опубликован один раз: запись в памяти не даёт выставить копию повторно.
+    assert account.items.published == ["i1"]
+    flaky.failing = False
+    assert state.flush()
+    assert type(state).load(state.path).get(DEALS, "d1")["result"] == "ok"
+
+
+async def test_expired_relist_can_be_switched_off_live(
+    account, relist_config, state, notifier, monkeypatch
+):
+    import playerok_bot.relist as relist_module
+
+    account.items.expired = [_expired("e1")]
+    relist_config.expired = False
+    sleeps = 0
+
+    async def fake_sleep(seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(relist_module.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await make(account, relist_config, state, notifier).run_expired()
 
     assert account.items.published == []

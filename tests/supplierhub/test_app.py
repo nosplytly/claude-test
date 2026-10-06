@@ -15,11 +15,12 @@ from typing import Any
 
 import pytest
 
+from supplierhub import api as api_module
 from supplierhub import app, paths
-from supplierhub.api import Api
+from supplierhub.api import Api, endpoint_names
 from supplierhub.feed import LogBuffer
 
-from .conftest import wait_until
+from .conftest import FakeBot, wait_until
 
 ROOT = Path(__file__).resolve().parents[2]
 URL = re.compile(r"(http://127\.0\.0\.1:(\d+)/index\.html#token=([\w-]+))")
@@ -127,6 +128,73 @@ def test_run_browser_port_busy(api: Api, capsys):
     assert "порт" in capsys.readouterr().err
 
 
+def test_quit_app_stops_browser_mode(api: Api, workdir: Path, monkeypatch):
+    monkeypatch.setattr(api_module, "QUIT_DELAY", 0.01)
+    url_file = workdir / app.INSTANCE_URL
+    result: list[int] = []
+    thread = threading.Thread(
+        target=lambda: result.append(app.run_browser(api, open_browser=False, url_file=url_file))
+    )
+    thread.start()
+    try:
+        wait_until(url_file.exists)
+        assert url_file.read_text(encoding="utf-8").startswith("http://127.0.0.1:")
+        assert api.quit_app() == {"ok": True, "data": {}}
+        thread.join(5)
+    finally:
+        api._set_quit(None)
+    assert result == [0]
+    assert not url_file.exists()
+
+
+def test_second_launch_opens_running_instance(tmp_path: Path, monkeypatch, capsys):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    first = app.ProcessLock(workdir / app.INSTANCE_LOCK)
+    assert first.acquire()
+    url = "http://127.0.0.1:5555/index.html#token=abc"
+    (workdir / app.INSTANCE_URL).write_text(url, encoding="utf-8")
+    opened: list[str] = []
+    monkeypatch.setattr(app.webbrowser, "open", opened.append)
+    monkeypatch.setattr(app, "run_browser", lambda *a, **k: pytest.fail("второй сервер"))
+    monkeypatch.setattr(app, "run_window", lambda *a, **k: pytest.fail("второе окно"))
+    try:
+        assert app.main(["--workdir", str(workdir)]) == 0
+    finally:
+        first.release()
+
+    assert opened == [url]
+    assert "уже работает" in capsys.readouterr().out
+
+
+def test_stale_instance_address_is_ignored(tmp_path: Path, monkeypatch):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / app.INSTANCE_URL).write_text("http://127.0.0.1:1/old", encoding="utf-8")
+    calls: list[Any] = []
+    monkeypatch.setattr(app, "run_browser", lambda *a, **k: calls.append(k) or 0)
+
+    assert app.main(["--workdir", str(workdir), "--browser", "--no-open"]) == 0
+
+    assert calls and calls[0]["url_file"] == workdir / app.INSTANCE_URL
+    assert not (workdir / app.INSTANCE_URL).exists()
+    # Замок снят: следующий запуск снова «первый».
+    lock = app.ProcessLock(workdir / app.INSTANCE_LOCK)
+    assert lock.acquire()
+    lock.release()
+
+
+def test_log_file_outside_workdir_is_not_written(tmp_path: Path, monkeypatch):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "config.toml").write_text('[bot]\nlog_file = "../payload.bat"\n', encoding="utf-8")
+    monkeypatch.setattr(app, "run_browser", lambda *a, **k: 0)
+
+    assert app.main(["--workdir", str(workdir), "--browser", "--no-open"]) == 0
+
+    assert not (tmp_path / "payload.bat").exists()
+
+
 # --- окно pywebview ----------------------------------------------------------------
 
 
@@ -147,6 +215,7 @@ def _fake_webview(monkeypatch: pytest.MonkeyPatch, *, fail: Exception | None = N
     class Events:
         def __init__(self) -> None:
             self.shown = Hook()
+            self.closing = Hook()
 
     class Hook:
         def __init__(self) -> None:
@@ -156,7 +225,20 @@ def _fake_webview(monkeypatch: pytest.MonkeyPatch, *, fail: Exception | None = N
             self.handlers.append(handler)
             return self
 
-    window = SimpleNamespace(events=Events())
+    def expose(*functions: Any) -> None:
+        calls.setdefault("exposed", []).extend(functions)
+
+    def confirm(title: str, message: str) -> bool:
+        calls.setdefault("confirm", []).append(message)
+        return calls.get("answer", True)
+
+    def destroy() -> None:
+        calls["destroyed"] = True
+
+    window = SimpleNamespace(
+        events=Events(), expose=expose, create_confirmation_dialog=confirm, destroy=destroy
+    )
+    calls["window"] = window
 
     def create_window(title: str, **kwargs: Any) -> Any:
         calls["create"] = {"title": title, **kwargs}
@@ -186,10 +268,51 @@ def test_run_window_opens_branded_window(api: Api, fake_web: Path, monkeypatch):
     assert (create["width"], create["height"]) == (1280, 820)
     assert create["min_size"] == (1040, 680)
     assert create["background_color"] == "#05070D"
-    assert create["js_api"] is api
+    # Окну отдаются только методы контракта, а не сам объект Api.
+    assert create["js_api"] is app.NO_JS_API
+    assert [func.__name__ for func in calls["exposed"]] == sorted(endpoint_names())
+    assert all(func.__self__ is api for func in calls["exposed"])
     assert create["url"] == str(fake_web / "index.html")
     assert calls["start"]["private_mode"] is False
     assert api.get_app_info()["data"]["mode"] == "window"
+
+
+def test_closing_window_with_running_bot_asks_first(
+    api: Api, fake_web: Path, monkeypatch, config_file: Path, fake_bot: FakeBot
+):
+    calls = _fake_webview(monkeypatch)
+    app.run_window(api)
+    (on_closing,) = calls["window"].events.closing.handlers
+
+    # Бот не запущен — окно закрывается без вопросов.
+    assert on_closing() is True
+    assert "confirm" not in calls
+
+    assert api.start_bot()["ok"] is True
+    wait_until(lambda: api.get_overview()["data"]["bot"]["status"] == "running")
+    calls["answer"] = False
+    assert on_closing() is False
+    assert "бот остановится" in calls["confirm"][0]
+    calls["answer"] = True
+    assert on_closing() is True
+
+
+def test_quit_app_closes_window_and_stops_bot(
+    api: Api, fake_web: Path, monkeypatch, config_file: Path, fake_bot: FakeBot
+):
+    calls = _fake_webview(monkeypatch)
+    monkeypatch.setattr(api_module, "QUIT_DELAY", 0.01)
+
+    def start(**kwargs: Any) -> None:
+        assert api.start_bot()["ok"] is True
+        wait_until(lambda: api.get_overview()["data"]["bot"]["status"] == "running")
+        assert api.quit_app() == {"ok": True, "data": {}}
+        assert api.get_overview()["data"]["bot"]["status"] == "stopped"
+        wait_until(lambda: calls.get("destroyed", False))
+
+    sys.modules["webview"].start = start  # type: ignore[attr-defined]
+    assert app.run_window(api) is True
+    assert fake_bot.cancelled.is_set()
 
 
 def test_run_window_falls_back_when_gui_missing(api: Api, fake_web: Path, monkeypatch):

@@ -27,7 +27,7 @@ import pytest
 
 pytest.importorskip("playwright.sync_api")
 
-from PlayerokAPI import User
+from PlayerokAPI import UnauthorizedError, User
 from playwright.sync_api import Browser, Error, Page, sync_playwright
 
 from playerok_bot import bot as bot_core
@@ -38,7 +38,7 @@ from supplierhub.feed import EventFeed
 from supplierhub.paths import web_dir
 from supplierhub.runtime import BotRuntime
 from supplierhub.server import BridgeServer
-from tests.conftest import FakeAccount, FakePolling, make_deal
+from tests.conftest import FakeAccount, FakeDeals, FakePolling, make_deal
 from tests.ui.screenshots import CHROMIUM
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,22 +179,30 @@ def test_first_rule_with_stock(
         page.wait_for_selector(".stock-item >> nth=4")
         assert drawer.locator(".stock__count-value").inner_text() == "5"
 
+        # Файл «ANSI» из Блокнота: кириллица не превращается в «\ufffd».
+        ansi = tmp_path / "ansi.txt"
+        ansi.write_bytes("Ключ Ж-5\r\n".encode("cp1251"))
+        drawer.locator('input[type="file"]').set_input_files(str(ansi))
+        check = page.locator(".layer--modal.is-open .modal")
+        check.get_by_role("button", name="Текст читается — добавить").click()
+        page.wait_for_selector(".stock-item >> nth=5")
+
         drawer.locator(".stock-item").first.hover()
         drawer.locator(".stock-item").first.get_by_role("button", name="Удалить товар").click()
-        page.wait_for_selector(".stock-item >> nth=4", state="detached")
-        assert drawer.locator(".stock__count-value").inner_text() == "4"
+        page.wait_for_selector(".stock-item >> nth=5", state="detached")
+        assert drawer.locator(".stock__count-value").inner_text() == "5"
 
         page.keyboard.press("Escape")
         page.wait_for_selector(".layer", state="detached")
         page.wait_for_function(
-            "() => document.querySelector('.stockbox__count')?.textContent.startsWith('4')"
+            "() => document.querySelector('.stockbox__count')?.textContent.startsWith('5')"
         )
 
-        # Без токена бот не стартует — и интерфейс объясняет, что делать.
-        page.locator(".botbox").get_by_role("button", name="Запустить").click()
-        toast = page.locator(".toast--error")
-        toast.wait_for()
-        assert "токен" in toast.inner_text()
+        # Без токена бот не стартует — меню сразу ведёт к полю токена.
+        botbox = page.locator(".botbox")
+        assert botbox.get_by_role("button", name="Запустить").count() == 0
+        botbox.get_by_role("button", name="Указать токен").click()
+        page.wait_for_selector('.page[data-page="settings"]')
 
     # На диске — конфиг, который читает бот, и склад с нужными строками.
     monkeypatch.setenv("PLAYEROK_TOKEN", "e2e-token")
@@ -203,7 +211,22 @@ def test_first_rule_with_stock(
     assert rule.match == "Ключ Steam"
     assert "{product}" in rule.message
     assert rule.stock_file == (backend.workdir / "stock" / "klyuch-steam.txt").resolve()
-    assert Stock(rule.stock_file).items() == ["KEY-2", "KEY-3", "KEY-4", "login: a \\n pass: b"]
+    assert Stock(rule.stock_file).items() == [
+        "KEY-2",
+        "KEY-3",
+        "KEY-4",
+        "login: a \\n pass: b",
+        "Ключ Ж-5",
+    ]
+
+
+def test_quit_closes_the_app_in_browser_mode(browser: Browser, backend: Backend) -> None:
+    """В режиме браузера окна нет: «Выйти» останавливает бота и завершает процесс."""
+    with open_app(browser, backend.url) as page:
+        page.locator(".sidebar__quit").click()
+        page.locator(".layer--confirm.is-open").get_by_role("button", name="Выйти").click()
+        page.locator(".splash__title", has_text="SupplierHub закрыт").wait_for()
+        assert backend.process.wait(15) == 0
 
 
 # --- 2. настоящий бот с фейковой площадкой ------------------------------------------
@@ -233,10 +256,12 @@ class PlayerokStub(FakeAccount):
     created: ClassVar[list[PlayerokStub]] = []
     #: Сколько секунд «входить в аккаунт» (медленная сеть).
     login_delay: ClassVar[float] = 0.3
+    #: Что купили (лот без правила — «Без автовыдачи»).
+    item_name: ClassVar[str] = "Ключ Steam Hades II"
 
     def __init__(self, token: str, proxy: str | None = None) -> None:
         super().__init__()
-        deal = make_deal("deal-e2e", name="Ключ Steam Hades II", price=349, buyer="kirill")
+        deal = make_deal("deal-e2e", name=self.item_name, price=349, buyer="kirill")
         deal.created_at = datetime.now(UTC) - timedelta(minutes=2)
         self.deals.page = [deal]
         self.deals.by_id = {deal.id: deal}
@@ -340,3 +365,57 @@ def test_slow_login_can_be_cancelled(
         page.wait_for_selector(".botbox__title:has-text('Остановлен')", timeout=10000)
         assert page.locator(".hero__title").inner_text() == "Бот остановлен"
     assert live_app["runtime"].status == "stopped"
+
+
+def test_rejected_token_is_not_shown_as_working(
+    browser: Browser, live_app: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Токен отозвали (выход из аккаунта в браузере): бот «запущен», но продажи стоят."""
+
+    async def rejected(self: FakeDeals, *, filter: dict[str, Any], first: int) -> Any:
+        raise UnauthorizedError(401, "https://playerok.com/graphql", message="Unauthorized")
+
+    monkeypatch.setattr(FakeDeals, "search", rejected)
+    with open_app(browser, live_app["url"]) as page:
+        page.locator(".hero").get_by_role("button", name="Запустить бота").click()
+        page.wait_for_selector(".botbox__title:has-text('Не работает')", timeout=10000)
+        hero = page.locator(".hero")
+        assert hero.locator(".hero__title").inner_text() == "Playerok не принимает токен"
+        assert "Бот работает" not in hero.inner_text()
+        hero.get_by_role("button", name="Обновить токен").click()
+        page.wait_for_selector('.page[data-page="settings"]')
+        page.locator('.nav__item[data-route="home"]').click()
+        page.locator(".hero").get_by_role("button", name="Остановить").click()
+        page.wait_for_selector(".botbox__title:has-text('Остановлен')", timeout=10000)
+
+
+def test_sale_without_rule_can_be_marked_handled(
+    browser: Browser, live_app: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Продавец выдал вручную — сделка уходит из «Требуют внимания» и бот её не трогает."""
+    monkeypatch.setattr(PlayerokStub, "item_name", "Аккаунт Genshin AR 60 (единственный)")
+    with open_app(browser, live_app["url"]) as page:
+        page.locator(".hero").get_by_role("button", name="Запустить бота").click()
+        page.wait_for_selector(".botbox__title:has-text('Работает')", timeout=10000)
+        badge = page.locator('.nav__item[data-route="sales"] .nav__badge')
+        badge.wait_for(timeout=10000)
+        assert badge.inner_text() == "1"
+
+        page.locator('.nav__item[data-route="sales"]').click()
+        row = page.locator(".table__body .trow", has_text="Genshin AR 60")
+        row.wait_for()
+        assert "Без автовыдачи" in row.inner_text()
+        row.click()
+        drawer = page.locator(".layer.is-open .drawer")
+        drawer.get_by_role("button", name="Отметить: выдано вручную").click()
+        page.locator(".layer--confirm.is-open").get_by_role("button", name="Отметить").click()
+        page.locator(".toast", has_text="выдано вручную").wait_for()
+        row.locator(".chip", has_text="Выдано вручную").wait_for(timeout=10000)
+        badge.wait_for(state="hidden", timeout=10000)
+
+        page.locator('.nav__item[data-route="home"]').click()
+        page.locator(".hero").get_by_role("button", name="Остановить").click()
+        page.wait_for_selector(".botbox__title:has-text('Остановлен')", timeout=10000)
+
+    [account] = PlayerokStub.created
+    assert account.chats.sent == []

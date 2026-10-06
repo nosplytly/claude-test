@@ -241,12 +241,16 @@ def test_overview_with_fake_state_and_watcher(api: Api, workdir: Path, config_fi
         "attention": 2,
         "stock_total": 3,
     }
+    assert data["account"].pop("balance_at") is not None
     assert data["account"] == {"id": "me", "username": "seller", "balance": 12.5}
     assert data["bot"] == {
         "status": "stopped",
         "error": None,
         "started_at": None,
         "uptime_sec": None,
+        "restart_required": False,
+        "problem": None,
+        "last_poll_at": None,
     }
     assert data["low_stock"] == []
     assert data["features"] == {

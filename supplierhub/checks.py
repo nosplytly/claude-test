@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import httpx
-from PlayerokAPI import (
-    Account,
-    AuthRequiredError,
-    GraphQLError,
-    PlayerokError,
-    UnauthorizedError,
-)
-from PlayerokAPI.exceptions import TokenError
+from PlayerokAPI import Account, PlayerokError
+
+from playerok_bot.bot import explain_playerok_error
 
 from .errors import ApiError
 
@@ -24,10 +20,9 @@ TIMEOUT = 20.0
 TELEGRAM_TEST_TEXT = "✅ Проверка связи: SupplierHub настроен верно."
 
 _TELEGRAM_API = "https://api.telegram.org"
-_BAD_TOKEN = (
-    "Playerok не принял токен. Возьмите свежий cookie token из браузера "
-    "(DevTools → Application → Cookies → playerok.com)."
-)
+_SOCKS = "SOCKS-прокси в этой сборке не поддерживается — укажите HTTP-прокси (http://…)."
+
+logger = logging.getLogger(__name__)
 
 
 async def fetch_account(token: str, proxy: str | None, *, timeout: float = TIMEOUT) -> dict:
@@ -40,17 +35,15 @@ async def fetch_account(token: str, proxy: str | None, *, timeout: float = TIMEO
         raise ApiError(
             f"Playerok не ответил за {timeout:g} с. Проверьте интернет или прокси."
         ) from None
-    except (UnauthorizedError, TokenError, AuthRequiredError):
-        raise ApiError(_BAD_TOKEN) from None
-    except GraphQLError as exc:
-        if exc.code in ("UNAUTHENTICATED", "UNAUTHORIZED"):
-            raise ApiError(_BAD_TOKEN) from None
-        raise ApiError(f"Не удалось подключиться к Playerok: {exc}") from None
     except PlayerokError as exc:
-        raise ApiError(f"Не удалось подключиться к Playerok: {exc}") from None
+        # Подробности (адрес, код ответа) — в журнал, пользователю — что делать.
+        logger.warning("Проверка токена: %r", exc)
+        raise ApiError(explain_playerok_error(exc)) from None
+    except ImportError:
+        raise ApiError(f"Прокси для Playerok: {_SOCKS}") from None
     except ValueError as exc:
         # httpx отвергает кривой адрес прокси ещё до запроса.
-        raise ApiError(f"Не удалось подключиться к Playerok: {exc}") from None
+        raise ApiError(f"Неверный адрес прокси для Playerok: {exc}") from None
     balance = me.balance.available if me.balance else 0.0
     return {"username": me.username, "balance": float(balance)}
 
@@ -84,6 +77,8 @@ async def send_telegram_test(
         raise ApiError(
             f"Не удалось связаться с Telegram: {detail}. Проверьте интернет или прокси."
         ) from None
+    except ImportError:
+        raise ApiError(f"Прокси для Telegram: {_SOCKS}") from None
     except ValueError as exc:
         raise ApiError(f"Неверный адрес прокси для Telegram: {exc}") from None
     if problems:

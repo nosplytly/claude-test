@@ -51,7 +51,9 @@ def test_start_running_stop(runtime: BotRuntime, fake_bot: FakeBot, tmp_path: Pa
     snap = runtime.snapshot()
     assert snap["error"] is None
     assert snap["started_at"] is not None and snap["uptime_sec"] >= 0
-    assert runtime.account() == {"id": "me-1", "username": "seller", "balance": 1234.5}
+    account = runtime.account()
+    assert account is not None and account.pop("balance_at")
+    assert account == {"id": "me-1", "username": "seller", "balance": 1234.5}
     assert runtime.watcher is fake_bot.watcher
     assert fake_bot.calls[0]["watch_chats"] is True
     # Уведомления бота попадают в ленту.
@@ -60,11 +62,20 @@ def test_start_running_stop(runtime: BotRuntime, fake_bot: FakeBot, tmp_path: Pa
     assert runtime.stop() == "stopped"
     assert fake_bot.cancelled.is_set()
     snap = runtime.snapshot()
-    assert snap == {"status": "stopped", "error": None, "started_at": None, "uptime_sec": None}
+    assert snap == {
+        "status": "stopped",
+        "error": None,
+        "started_at": None,
+        "uptime_sec": None,
+        "restart_required": False,
+        "problem": None,
+        "last_poll_at": None,
+    }
     # Аккаунт и наблюдатель остаются известны после остановки.
     assert runtime.account()["username"] == "seller"
     assert runtime.watcher is fake_bot.watcher
-    assert fake_bot.notifiers[0]._client.is_closed
+    # Telegram выключен — клиента для него даже не создавали.
+    assert fake_bot.notifiers[0]._client is None
 
 
 def test_second_start_is_rejected(runtime: BotRuntime, fake_bot: FakeBot, tmp_path: Path):
@@ -88,7 +99,8 @@ def test_bot_error_sets_error_status(runtime: BotRuntime, fake_bot: FakeBot, tmp
     assert runtime.snapshot()["error"] == "Playerok не принял токен."
     assert runtime.account() is None
     # Уведомитель закрыт, даже если run() упал до входа.
-    assert fake_bot.notifiers[0]._client.is_closed
+    client = fake_bot.notifiers[0]._client
+    assert client is None or client.is_closed
     assert runtime.stop() == "error"
 
 

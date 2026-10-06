@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 from pathlib import Path
 from typing import Any, ClassVar
@@ -9,11 +8,12 @@ from typing import Any, ClassVar
 import httpx
 import pytest
 from PlayerokAPI import GraphQLError, NetworkError, UnauthorizedError
+from PlayerokAPI.exceptions import ForbiddenError, RequestTimeoutError, ServerError
 
-from supplierhub import checks
+from supplierhub import app, checks
 from supplierhub.api import Api, endpoint_names
 
-from .conftest import FakeBot, make_me
+from .conftest import FakeBot, make_me, wait_until
 
 #: Все методы из контракта окна (spec: «API methods»).
 CONTRACT = {
@@ -39,26 +39,70 @@ CONTRACT = {
     "test_telegram",
     "open_path",
     "open_url",
+    # Добавлены после ревью: выход из приложения и действия с продажами.
+    "quit_app",
+    "mark_handled",
+    "retry_delivery",
 }
 
 GARBAGE: list[Any] = [None, 0, -1, 10**12, 1.5, True, "", "x" * 50, [], {}, [1, "a"], {"a": [None]}]
 
 
-def _exposed_like_pywebview(api: Api) -> set[str]:
-    """Что увидит окно: pywebview отдаёт публичные методы и обходит публичные объекты."""
-    names = set()
-    for name in dir(api):
-        if name.startswith("_"):
-            continue
-        attr = getattr(api, name)
-        assert inspect.ismethod(attr), f"публичный не-метод {name} утёк бы в окно"
-        names.add(name)
-    return names
-
-
 def test_exposed_methods_match_contract(api: Api):
     assert endpoint_names() == CONTRACT
-    assert _exposed_like_pywebview(api) == CONTRACT
+    assert [method.__name__ for method in app.exposed_endpoints(api)] == sorted(CONTRACT)
+
+
+class _BridgeWindow:
+    """Окно pywebview для js_bridge_call: тот же путь, что у WebView2."""
+
+    def __init__(self, functions: list[Any]) -> None:
+        self._js_api = app.NO_JS_API
+        self._functions = {func.__name__: func for func in functions}
+        self.evaluated: list[str] = []
+
+    def evaluate_js(self, script: str) -> None:
+        self.evaluated.append(script)
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("_open_path", ["C:\\Windows\\System32\\calc.exe"]),
+        ("_open_url", ["file:///C:/Windows/System32/calc.exe"]),
+        ("_config._write", [{"delivery": {"rules": []}}]),
+        ("_config.path.write_text", ["pwned"]),
+        ("_runtime.stop", []),
+        ("_set_mode", ["browser"]),
+        ("get_config.__self__._open_path", ["C:\\x.bat"]),
+        ("get_config.__func__.__globals__", []),
+        ("__class__.__init__", []),
+    ],
+)
+def test_window_bridge_cannot_reach_private_attributes(
+    api: Api, workdir: Path, opened: dict[str, list[Any]], name: str, args: list[Any]
+):
+    """Страница в окне может прислать любое имя: доступны только методы контракта."""
+    webview_util = pytest.importorskip("webview.util")
+    (workdir / "config.toml").write_text("# мой конфиг\n", encoding="utf-8")
+    window = _BridgeWindow(app.exposed_endpoints(api))
+
+    webview_util.js_bridge_call(window, name, args, "1")
+
+    assert opened == {"paths": [], "urls": []}
+    assert (workdir / "config.toml").read_text(encoding="utf-8") == "# мой конфиг\n"
+    assert api.get_app_info()["data"]["mode"] == "window"
+    assert window.evaluated == []
+
+
+def test_window_bridge_calls_public_endpoint(api: Api):
+    webview_util = pytest.importorskip("webview.util")
+    window = _BridgeWindow(app.exposed_endpoints(api))
+
+    webview_util.js_bridge_call(window, "get_app_info", [], "7")
+
+    wait_until(lambda: bool(window.evaluated))
+    assert '"mode": "window"' in window.evaluated[0]
 
 
 def test_app_info(api: Api, workdir: Path):
@@ -75,7 +119,7 @@ def test_app_info(api: Api, workdir: Path):
     assert api.get_app_info()["data"]["mode"] == "browser"
 
 
-@pytest.mark.parametrize("method", sorted(CONTRACT - {"check_token", "test_telegram"}))
+@pytest.mark.parametrize("method", sorted(CONTRACT - {"check_token", "test_telegram", "quit_app"}))
 def test_envelope_never_raises(api: Api, config_file: Path, fake_bot: FakeBot, method: str):
     func = getattr(api, method)
     calls: list[tuple[Any, ...]] = [()]
@@ -202,7 +246,14 @@ def test_check_token_uses_saved_token_and_proxy(
             "не принял токен",
         ),
         (GraphQLError([{"message": "rate"}], "viewer"), "viewer: rate"),
-        (NetworkError("connection reset"), "Не удалось подключиться к Playerok: connection reset"),
+        # Сетевые ошибки — простыми словами и с подсказкой, без технических подробностей.
+        (NetworkError("connection reset"), "Нет связи с Playerok. Проверьте интернет, VPN"),
+        (
+            ForbiddenError(403, "https://bff.playerok.com/rest-api/public/viewer"),
+            "не пускает с этого компьютера (ошибка 403)",
+        ),
+        (ServerError(502, "https://playerok.com/graphql"), "Playerok сейчас не работает"),
+        (RequestTimeoutError("read timeout"), "не ответил вовремя"),
     ],
 )
 def test_check_token_errors(api: Api, fake_account: type[FakeAccount], error, fragment):
@@ -337,6 +388,49 @@ def test_open_path_log_disabled(api: Api, workdir: Path):
     result = api.open_path("log")
 
     assert result["ok"] is False and "отключена" in result["error"]
+
+
+@pytest.mark.parametrize("log_file", ["../payload.bat", "logs/run.bat", "/tmp/elsewhere.log"])
+def test_open_path_log_only_plain_log_inside_workdir(
+    api: Api, workdir: Path, opened: dict[str, list[Any]], log_file: str
+):
+    # Чужой «готовый» config.toml мог бы подсунуть .bat — «открыть журнал» его не запустит.
+    target = (workdir / log_file).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("echo pwned", encoding="utf-8")
+    (workdir / "config.toml").write_text(f'[bot]\nlog_file = "{log_file}"\n', encoding="utf-8")
+
+    result = api.open_path("log")
+
+    assert result["ok"] is False and "откройте его вручную" in result["error"]
+    assert opened["paths"] == []
+
+
+def test_config_saved_by_notepad_with_bom(api: Api, workdir: Path):
+    text = '[playerok]\r\ntoken = "tok"\r\n[telegram]\r\nenabled = false\r\n'
+    (workdir / "config.toml").write_bytes(text.encode("utf-8-sig"))
+
+    assert api.get_config()["data"]["playerok"]["token"] == "tok"
+    assert api.get_overview()["data"]["config_error"] is None
+    assert api.save_config({"telegram": {"notify_messages": False}})["ok"] is True
+    assert not (workdir / "config.toml").read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_bad_proxy_is_refused_on_save(api: Api, workdir: Path):
+    result = api.save_config({"telegram": {"enabled": False, "proxy": "1.2.3.4:8080"}})
+
+    assert result["ok"] is False and "http://" in result["error"]
+    assert not (workdir / "config.toml").exists()
+
+
+async def test_telegram_test_with_socks_proxy_is_explained(monkeypatch: pytest.MonkeyPatch):
+    def no_socks(*args: Any, **kwargs: Any) -> Any:
+        raise ImportError("Using SOCKS proxy, but the 'socksio' package is not installed.")
+
+    monkeypatch.setattr(checks.httpx, "AsyncClient", no_socks)
+
+    with pytest.raises(checks.ApiError, match="SOCKS-прокси"):
+        await checks.send_telegram_test("1:a", [1], "socks5://1.2.3.4:1080")
 
 
 @pytest.mark.parametrize(

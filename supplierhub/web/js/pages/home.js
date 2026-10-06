@@ -120,14 +120,21 @@
       );
     }
 
-    function renderHero({ bot, account, features, busy, hasToken }) {
+    function renderHero({ bot, account, features, busy, hasToken, problem, restart, mode }) {
       const status = bot.status;
       const st = botState(status);
       const pending = busy || status === 'starting' || status === 'stopping';
       const active = status === 'running' || status === 'starting';
+      const trouble = problem ? problemInfo(problem) : null;
 
+      // Бот запущен, но не работает: текст причины даёт бэкенд, здесь — запасной.
+      const TROUBLE_LEADS = {
+        auth: 'Продажи не обрабатываются, товар не выдаётся. Вставьте новый токен в настройках и перезапустите бота.',
+        network: 'Продажи не обрабатываются, товар не выдаётся — бот пробует подключиться снова.',
+      };
       let lead;
-      if (status === 'running') lead = 'Следит за продажами, выдаёт товар и присылает уведомления.';
+      if (trouble) lead = problem.text || TROUBLE_LEADS[problem.kind] || 'Бот работает с ошибками — подробности в журнале.';
+      else if (status === 'running') lead = 'Следит за продажами, выдаёт товар и присылает уведомления.';
       else if (status === 'starting') lead = 'Входим в аккаунт Playerok и загружаем последние продажи…';
       else if (status === 'stopping') lead = 'Дожидаемся текущих задач — это займёт пару секунд.';
       else if (status === 'error') lead = 'Исправьте причину и запустите бота снова.';
@@ -136,10 +143,16 @@
       else lead = 'Запустите бота — он войдёт в аккаунт Playerok и начнёт следить за продажами.';
 
       const meta = [];
-      if (status === 'running' && bot.uptime_sec !== null) meta.push(metaItem('clock', `Аптайм ${fmtDuration(bot.uptime_sec)}`));
+      if (trouble && problem.since) meta.push(metaItem('alert', `Не работает с ${fmtShortTime(problem.since)}`, 'hero__meta-item--warning'));
+      else if (status === 'running' && bot.uptime_sec !== null) meta.push(metaItem('clock', `Работает ${fmtDuration(bot.uptime_sec)}`));
       if (account) {
         meta.push(metaItem('ring', account.username, 'hero__meta-item--strong'));
-        meta.push(metaItem('diamond', `Баланс ${fmtMoney(account.balance)}`));
+        // Баланс приходит с Playerok не постоянно — честно пишем, на какой момент он верен.
+        const balanceAt = 'balance_at' in account ? account.balance_at : undefined;
+        const balanceLabel = balanceAt ? `Баланс на ${fmtShortTime(balanceAt)}: ${fmtMoney(account.balance)}` : `Баланс при запуске: ${fmtMoney(account.balance)}`;
+        const item = metaItem('diamond', balanceLabel);
+        if (balanceAt) item.title = `Получен с Playerok ${fmtDateTime(balanceAt)}`;
+        meta.push(item);
       }
 
       let actions;
@@ -152,16 +165,26 @@
           actions.push(btn('Отменить', { kind: 'ghost', size: 'lg', icon: 'stop', onClick: () => botAction('stop') }));
         }
       } else if (active) {
-        actions = [
-          btn('Остановить', { kind: 'secondary', size: 'lg', icon: 'stop', onClick: () => botAction('stop') }),
-          btn('Перезапустить', { kind: 'ghost', size: 'lg', icon: 'restart', onClick: () => botAction('restart') }),
-        ];
+        // Есть несохранённые для бота изменения — следующий шаг «Перезапустить» (в т.ч. после нового токена).
+        const restartBtn = (kind) => btn('Перезапустить', { kind, size: 'lg', icon: 'restart', onClick: () => botAction('restart'), cls: kind === 'primary' && 'hero__start' });
+        actions = [];
+        if (restart) actions.push(restartBtn('primary'));
+        if (trouble && problem.kind === 'auth') {
+          actions.push(btn('Обновить токен', { kind: restart ? 'secondary' : 'primary', size: 'lg', icon: 'key', onClick: () => navigate('settings?focus=token'), cls: !restart && 'hero__start' }));
+        } else if (trouble && problem.kind === 'network') {
+          actions.push(btn('Прокси и сеть', { kind: 'secondary', size: 'lg', icon: 'globe', onClick: () => navigate('settings?focus=advanced') }));
+        }
+        actions.push(btn('Остановить', { kind: 'secondary', size: 'lg', icon: 'stop', onClick: () => botAction('stop') }));
+        if (!restart) actions.push(restartBtn('ghost'));
       } else if (!hasToken) {
         actions = [btn('Указать токен', { kind: 'primary', size: 'lg', icon: 'key', onClick: () => navigate('settings?focus=token'), cls: 'hero__start' })];
       } else {
         actions = [btn('Запустить бота', { kind: 'primary', size: 'lg', icon: 'play', onClick: () => botAction('start'), cls: 'hero__start' })];
         if (status === 'error' && /токен/i.test(bot.error || '')) {
           actions.push(btn('Настройки', { kind: 'ghost', size: 'lg', icon: 'key', onClick: () => navigate('settings?focus=token') }));
+        } else if (status === 'error' && /прокси|интернет|нет связи/i.test(bot.error || '')) {
+          // Сетевая ошибка: следующий шаг — прокси в «Дополнительно», ведём прямо туда.
+          actions.push(btn('Прокси и сеть', { kind: 'ghost', size: 'lg', icon: 'globe', onClick: () => navigate('settings?focus=advanced') }));
         }
         if (status === 'error') actions.push(btn('Журнал', { kind: 'ghost', size: 'lg', icon: 'logs', onClick: () => navigate('logs') }));
       }
@@ -173,20 +196,36 @@
         { on: features.relist_expired, label: 'Истёкшие лоты', href: '#/relist' },
       ];
 
-      hero.className = `card hero hero--${status}`;
+      let note = null;
+      if (trouble && problem.kind === 'network') {
+        note = 'Проверьте интернет и VPN. Если Playerok открывается только через прокси — укажите его в настройках.';
+      } else if (status === 'running' && !trouble) {
+        note =
+          mode === 'browser'
+            ? 'Вкладку можно закрыть — бот продолжит работу. Чтобы выключить SupplierHub, нажмите «Выйти» внизу меню.'
+            : 'Не закрывайте окно — бот работает, пока открыт SupplierHub. Окно можно свернуть.';
+      }
+
+      hero.className = `card hero hero--${trouble ? 'problem' : status}`;
       replace(
         hero,
         h(
           'div',
           { class: 'hero__main' },
-          h('div', { class: ['hero__status', `tone--${st.tone}`] }, h('span', { class: ['dot', `dot--${st.tone}`, status === 'running' && 'dot--pulse'] }), st.short),
-          h('h2', { class: 'hero__title' }, st.title),
+          trouble
+            ? h('div', { class: ['hero__status', 'tone--warning'] }, h('span', { class: ['dot', 'dot--warning'] }), 'Не работает')
+            : h('div', { class: ['hero__status', `tone--${st.tone}`] }, h('span', { class: ['dot', `dot--${st.tone}`, status === 'running' && 'dot--pulse'] }), st.short),
+          h('h2', { class: 'hero__title' }, trouble ? trouble.title : st.title),
           h('p', { class: 'hero__lead' }, lead),
           meta.length > 0 && h('div', { class: 'hero__meta' }, meta),
           status === 'error' && bot.error && h('div', { class: 'hero__error', role: 'alert' }, icon('alert', 16), h('span', {}, bot.error)),
+          restart &&
+            !trouble &&
+            h('div', { class: 'hero__error hero__error--warning', role: 'status' }, icon('alert', 16), h('span', {}, 'Бот работает со старыми настройками — перезапустите его, чтобы изменения вступили в силу.')),
           h('div', { class: 'hero__actions' }, actions),
+          note && h('p', { class: 'hero__note' }, icon('info', 14), note),
         ),
-        h('div', { class: 'hero__art' }, logoArt(status === 'stopping' ? 'stopped' : status, 58)),
+        h('div', { class: 'hero__art' }, logoArt(trouble ? 'error' : status === 'stopping' ? 'stopped' : status, 58)),
         h(
           'div',
           { class: 'hero__features' },
@@ -240,7 +279,8 @@
           run: true,
         },
       ];
-      const next = steps.findIndex((step) => !step.done);
+      // Необязательный Telegram не перехватывает главную кнопку у обязательных шагов.
+      const next = steps.findIndex((step) => !step.done && !step.optional);
       const doneCount = steps.filter((step) => step.done).length;
       replace(
         setup,
@@ -315,7 +355,7 @@
           tone: attention ? 'warning' : 'white',
           label: 'Требуют внимания',
           value: fmtInt(attention),
-          caption: attention ? 'ошибки или нет товара' : 'всё в порядке',
+          caption: attention ? 'проблемы с выдачей' : 'всё в порядке',
           href: '#/sales?filter=attention',
           alert: attention > 0,
         }),
@@ -365,8 +405,12 @@
       );
     }
 
-    function renderLive(status) {
+    function renderLive({ status, problem }) {
       const running = status === 'running';
+      if (running && problem) {
+        replace(live, h('span', { class: 'dot dot--warning', 'aria-hidden': 'true' }), 'бот не работает');
+        return;
+      }
       replace(live, h('span', { class: ['dot', running ? 'dot--success dot--pulse' : 'dot--muted'], 'aria-hidden': 'true' }), running ? 'онлайн' : 'бот не запущен');
     }
 
@@ -390,15 +434,29 @@
       if (!ov) return;
       section('banner', { configError: ov.config_error }, renderBanner);
       const minute = ov.bot.uptime_sec === null ? null : Math.floor(ov.bot.uptime_sec / 60);
-      section('hero', { bot: { ...ov.bot, uptime_sec: minute === null ? null : minute * 60, started_at: null }, account: ov.account, features: ov.features, busy: App.botBusy, hasToken: ov.setup.token }, renderHero);
+      section(
+        'hero',
+        {
+          bot: { ...ov.bot, uptime_sec: minute === null ? null : minute * 60, started_at: null, last_poll_at: null, problem: null, restart_required: null },
+          account: ov.account,
+          features: ov.features,
+          busy: App.botBusy,
+          hasToken: ov.setup.token,
+          problem: botProblem(ov),
+          restart: restartNeeded(ov),
+          mode: App.info && App.info.mode,
+        },
+        renderHero,
+      );
       section('setup', { setup: ov.setup, status: ov.bot.status, busy: App.botBusy }, renderSetup);
       section('kpis', ov.stats, renderKpis);
       section('stock', { low: ov.low_stock || [], total: ov.stats.stock_total }, renderStock);
-      section('live', ov.bot.status, renderLive);
+      section('live', { status: ov.bot.status, problem: Boolean(botProblem(ov)) }, renderLive);
     }
 
     ctx.on('overview', update);
     ctx.on('bot-busy', () => update(App.overview));
+    ctx.on('restart', () => update(App.overview));
     ctx.on('feed', renderFeed);
     ctx.every(30000, renderFeed);
     update(App.overview);

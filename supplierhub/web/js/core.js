@@ -310,6 +310,36 @@ const Bridge = (() => {
     return pw && pw.api && typeof pw.api.get_overview === 'function' ? pw.api : null;
   }
 
+  /** Ошибка, после которой повторять бесполезно: нужен новый адрес страницы. */
+  function staleLinkError(
+    reason = 'Эту страницу открыли без ключа доступа — например, из закладки или истории браузера.',
+  ) {
+    const error = new Error(`${reason} Закройте вкладку и запустите SupplierHub ярлыком: он сам откроет нужную страницу.`);
+    error.title = 'Ссылка устарела';
+    error.final = true;
+    return error;
+  }
+
+  /**
+   * Мост режима браузера отвечает 403 на запрос без токена, а встроенный
+   * сервер окна pywebview о /api ничего не знает. Так страница из закладки
+   * сразу понимает, что ждать окна бесполезно.
+   */
+  async function bridgeRejects() {
+    if (!/^https?:$/.test(location.protocol)) return false;
+    try {
+      const response = await fetch('/api/get_app_info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"args":[]}',
+        cache: 'no-store',
+      });
+      return response.status === 403;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /** Дождаться pywebview (окно) или убедиться, что есть токен моста (браузер). */
   function ready() {
     if (nativeApi() || token) return Promise.resolve();
@@ -332,6 +362,11 @@ const Bridge = (() => {
           window.removeEventListener('pywebviewready', check);
         };
         window.addEventListener('pywebviewready', check);
+        bridgeRejects().then((rejected) => {
+          if (!rejected || nativeApi()) return;
+          stop();
+          reject(staleLinkError());
+        });
       });
     }
     return waiter;
@@ -350,7 +385,8 @@ const Bridge = (() => {
       throw new Error('SupplierHub не отвечает — возможно, приложение закрыто.');
     }
     if (response.status === 403) {
-      throw new Error('Нет доступа: откройте интерфейс заново из приложения SupplierHub.');
+      // Ключ из этой вкладки не подходит: SupplierHub перезапускали, у него новый адрес.
+      throw staleLinkError('Ключ доступа этой вкладки устарел — SupplierHub перезапускали.');
     }
     if (response.status === 404) throw new Error(`Приложение не знает команду ${method}.`);
     try {
@@ -385,6 +421,19 @@ const Bridge = (() => {
 /** Вызвать метод приложения: вернёт data или бросит Error с текстом по-русски. */
 function api(method, ...args) {
   return Bridge.call(method, args);
+}
+
+/*
+ * Файл, брошенный в окно мимо поля загрузки, браузер открыл бы вместо
+ * приложения — а странице в окне pywebview доступны методы приложения.
+ * Поэтому перетаскивание файлов на страницу ничего не открывает; товар
+ * загружают кнопкой «Загрузить из .txt». Перетаскивание текста не трогаем.
+ */
+for (const type of ['dragover', 'drop']) {
+  window.addEventListener(type, (event) => {
+    const types = event.dataTransfer ? Array.from(event.dataTransfer.types || []) : [];
+    if (types.includes('Files')) event.preventDefault();
+  });
 }
 
 /* ------------------------------------------------------- Форматирование */
