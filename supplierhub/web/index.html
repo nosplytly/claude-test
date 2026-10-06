@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- 'unsafe-eval' нужен мосту pywebview (new Function / eval для ответов Python); встроенные скрипты запрещены. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark">
+  <title>SupplierHub</title>
+  <link rel="icon" type="image/png" href="assets/icon-256.png">
+  <link rel="preload" href="assets/fonts/inter-cyrillic-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="assets/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <div class="splash" role="status">
+      <img class="splash__logo" src="assets/logo.svg" alt="" width="72" height="72">
+      <div class="splash__name">SupplierHub</div>
+      <div class="splash__text">Подключаемся к приложению…</div>
+    </div>
+  </div>
+  <div id="layers"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="js/core.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/pages/home.js"></script>
+  <script src="js/pages/sales.js"></script>
+  <script src="js/pages/delivery.js"></script>
+  <script src="js/pages/relist.js"></script>
+  <script src="js/pages/settings.js"></script>
+  <script src="js/pages/logs.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
