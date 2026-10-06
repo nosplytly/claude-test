@@ -79,7 +79,7 @@ class AutoDelivery:
 
     def skip(self, deal: Deal, reason: str) -> None:
         """Пометить сделку как не требующую выдачи."""
-        self._state.put(SECTION, deal.id, status=SKIPPED, reason=reason, item=_name(deal))
+        self._state.put(SECTION, deal.id, status=SKIPPED, reason=reason, **_meta(deal))
 
     async def process(self, deal: Deal) -> None:
         """Выдать товар по оплаченной продаже. Повторный вызов безопасен."""
@@ -95,7 +95,7 @@ class AutoDelivery:
 
         rule = self._config.find_rule(_name(deal))
         if rule is None:
-            self._state.put(SECTION, deal.id, status=NO_RULE, item=_name(deal))
+            self._state.put(SECTION, deal.id, status=NO_RULE, **_meta(deal))
             await self._notifier.send(
                 f"ℹ️ Для лота {_ref(deal)} нет правила автовыдачи — выдайте товар вручную."
             )
@@ -123,12 +123,12 @@ class AutoDelivery:
                         f"сделка {_ref(deal)} ждёт выдачи. Пополните файл — бот выдаст "
                         "товар при следующей проверке."
                     )
-                self._state.put(SECTION, deal.id, status=NO_STOCK, item=_name(deal))
+                self._state.put(SECTION, deal.id, status=NO_STOCK, **_meta(deal))
                 return None
             products = taken
         # Сначала запоминаем выданное, потом отправляем: если бот упадёт между
         # этими шагами, после перезапуска уйдёт тот же товар, а не новый.
-        self._state.put(SECTION, deal.id, status=RESERVED, item=_name(deal), products=products)
+        self._state.put(SECTION, deal.id, status=RESERVED, products=products, **_meta(deal))
         return products
 
     async def _send(self, deal: Deal, rule: DeliveryRule, products: list[str]) -> None:
@@ -184,6 +184,16 @@ class AutoDelivery:
                 f"⚠️ Ошибка выдачи по сделке {_ref(deal)}: {esc(exc)}. "
                 "Повторю при следующей проверке."
             )
+
+
+def _meta(deal: Deal) -> dict[str, object]:
+    """Что запомнить о сделке для истории продаж в приложении."""
+    return {
+        "item": _name(deal),
+        "buyer": _buyer(deal),
+        "price": deal.item.price if deal.item else None,
+        "chat_id": deal.chat_id,
+    }
 
 
 def _name(deal: Deal) -> str | None:

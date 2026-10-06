@@ -66,6 +66,8 @@ class DealWatcher:
         self._known: dict[str, tuple[ItemDealStatus | None, bool]] = {}
         self._seeded = asyncio.Event()
         self._auth_alerted = False
+        #: Последние продажи из последнего опроса, новые сверху.
+        self.recent: list[Deal] = []
 
     async def run_polling(self, interval: float) -> None:
         while True:
@@ -112,6 +114,7 @@ class DealWatcher:
             if seeding and self._first_run and deal.status == ItemDealStatus.PAID:
                 preexisting.append(deal)
             await self.handle(deal, seeding=seeding)
+        self.recent = list(page.items)
         if preexisting:
             links = "\n".join(f"• {_ref(deal)}" for deal in preexisting)
             await self._notifier.send(

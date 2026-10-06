@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from PlayerokAPI import Account, ItemDealDirection, PlayerokError, UnauthorizedError, User
@@ -26,11 +26,25 @@ class BotError(Exception):
     """Ошибка запуска — сообщение показывается пользователю как есть."""
 
 
-async def run(config: Config) -> None:
-    """Запустить бота и работать, пока не остановят."""
+async def run(
+    config: Config,
+    *,
+    notifier: Notifier | None = None,
+    on_started: Callable[[User, DealWatcher], None] | None = None,
+    watch_chats: bool | None = None,
+) -> None:
+    """Запустить бота и работать, пока не остановят.
+
+    `notifier` — свой уведомитель (например, окно приложения), он закрывается
+    по завершении. `on_started` вызывается после входа в аккаунт.
+    `watch_chats` включает слежение за сообщениями; по умолчанию — только
+    когда их есть куда пересылать (включён Telegram).
+    """
     state = State.load(config.state_file)
     first_run = state.fresh
-    notifier = Notifier(config.telegram)
+    notifier = notifier or Notifier(config.telegram)
+    if watch_chats is None:
+        watch_chats = config.telegram.enabled
     try:
         async with Account(token=config.playerok.token, proxy=config.playerok.proxy) as account:
             me = await _login(account)
@@ -43,7 +57,7 @@ async def run(config: Config) -> None:
             ]
             if config.playerok.use_websocket:
                 tasks.append(watcher.run_websocket())
-            if config.telegram.enabled and config.telegram.notify_messages:
+            if watch_chats and config.telegram.notify_messages:
                 tasks.append(
                     watch_messages(account, me.id, notifier, config.telegram.messages_interval)
                 )
@@ -51,6 +65,8 @@ async def run(config: Config) -> None:
                 tasks.append(relist.run_expired())
 
             logger.info("Бот запущен как %s", me.username)
+            if on_started is not None:
+                on_started(me, watcher)
             await notifier.send(_startup_text(config, me))
             await asyncio.gather(*tasks)
     finally:

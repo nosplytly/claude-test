@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="SupplierHub">
+  <defs>
+    <filter id="sh-glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+  <rect x="52" y="52" width="44" height="44" rx="11" fill="#1F4DFF" opacity=".85" filter="url(#sh-glow)"/>
+  <rect x="4" y="4" width="44" height="44" rx="11" fill="#F4F4F2"/>
+  <circle cx="26" cy="26" r="8.6" fill="none" stroke="#0B0B0F" stroke-width="5.6"/>
+  <rect x="52" y="4" width="44" height="44" rx="11" fill="#F4F4F2"/>
+  <path d="M74 13.4 86.6 26 74 38.6 61.4 26Z" fill="#0B0B0F"/>
+  <rect x="4" y="52" width="44" height="44" rx="11" fill="#F4F4F2"/>
+  <rect x="14.2" y="66.5" width="23.6" height="15" rx="3.2" fill="#0B0B0F"/>
+  <rect x="52" y="52" width="44" height="44" rx="11" fill="#2B5CFF"/>
+  <rect x="71" y="63.4" width="6" height="21.2" rx="1.6" fill="#0B0B0F"/>
+  <rect x="63.4" y="71" width="21.2" height="6" rx="1.6" fill="#0B0B0F"/>
+</svg>
